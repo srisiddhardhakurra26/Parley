@@ -10,7 +10,7 @@ import type { DisclosurePolicy, Role, TurnIntents } from './types.ts';
 // LLM config. Groq's free tier is the default; point LLM_BASE_URL / LLM_API_KEY
 // / LLM_MODEL at any OpenAI-compatible provider (Together, OpenRouter, Cerebras,
 // a local Ollama, …) to use that instead.
-interface LLMConfig { baseURL: string; apiKey: string; model: string; label: string; }
+interface LLMConfig { baseURL: string; apiKey: string; model: string; fallbackModel?: string; label: string; }
 
 function resolveLLM(): LLMConfig | null {
   if (process.env.LLM_API_KEY) {
@@ -18,6 +18,7 @@ function resolveLLM(): LLMConfig | null {
       baseURL: (process.env.LLM_BASE_URL ?? 'https://api.groq.com/openai/v1').replace(/\/+$/, ''),
       apiKey: process.env.LLM_API_KEY,
       model: process.env.LLM_MODEL ?? 'llama-3.3-70b-versatile',
+      fallbackModel: process.env.LLM_FALLBACK_MODEL,
       label: 'llm',
     };
   }
@@ -26,6 +27,9 @@ function resolveLLM(): LLMConfig | null {
       baseURL: 'https://api.groq.com/openai/v1',
       apiKey: process.env.GROQ_API_KEY,
       model: process.env.GROQ_MODEL ?? 'llama-3.3-70b-versatile',
+      // A smaller, higher-daily-limit model to fall over to when the primary is
+      // rate-limited — keeps the parley alive instead of dying to the mock.
+      fallbackModel: process.env.GROQ_FALLBACK_MODEL ?? 'llama-3.1-8b-instant',
       label: 'groq',
     };
   }
@@ -336,40 +340,57 @@ class LLMProvider implements Provider {
   // 5xx, network blips) — the free tier hiccups occasionally and an un-retried
   // failure used to fall through to a dead "let me come back to you" turn,
   // which could stall the whole parley. Client errors (4xx) are not retried.
+  // Try the primary model; if it's rate-limited (e.g. the daily token cap on the
+  // big model) or down, fall straight over to a smaller, higher-limit model so the
+  // parley keeps producing real turns instead of dying to the mock fallback.
   private async chat(messages: { role: string; content: string }[], maxTokens: number, json = false, temperature = 0.6): Promise<string> {
+    const models = [...new Set([this.cfg.model, this.cfg.fallbackModel].filter((m): m is string => Boolean(m)))];
+    let lastErr: unknown;
+    for (let i = 0; i < models.length; i++) {
+      try {
+        return await this.callOnce(models[i]!, messages, maxTokens, json, temperature);
+      } catch (e) {
+        lastErr = e;
+        const status = (e as { status?: number }).status;
+        const switchable = status === 429 || (status !== undefined && status >= 500) || e instanceof TypeError;
+        if (!switchable || i === models.length - 1) throw e;
+        if (status === 429) console.warn(`[parley] ${models[i]} rate-limited — falling over to ${models[i + 1]}`);
+      }
+    }
+    throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+  }
+
+  private async callOnce(model: string, messages: { role: string; content: string }[], maxTokens: number, json: boolean, temperature: number): Promise<string> {
     let lastErr: unknown;
     for (let attempt = 1; attempt <= 4; attempt++) {
       try {
         const res = await fetch(`${this.cfg.baseURL}/chat/completions`, {
           method: 'POST',
           headers: { 'content-type': 'application/json', authorization: `Bearer ${this.cfg.apiKey}` },
-          body: JSON.stringify({
-            model: this.cfg.model,
-            messages,
-            temperature,
-            max_tokens: maxTokens,
-            ...(json ? { response_format: { type: 'json_object' } } : {}),
-          }),
+          body: JSON.stringify({ model, messages, temperature, max_tokens: maxTokens, ...(json ? { response_format: { type: 'json_object' } } : {}) }),
         });
         if (!res.ok) {
           const body = (await res.text()).slice(0, 300);
-          const retryable = res.status === 429 || res.status >= 500;
-          // Groq tells us exactly how long to wait, in the header or the message body.
           const header = Number(res.headers.get('retry-after'));
           const hinted = body.match(/try again in ([\d.]+)s/i);
           const retryAfterMs = header ? header * 1000 : hinted ? Number(hinted[1]) * 1000 : 0;
-          throw Object.assign(new Error(`LLM ${res.status}: ${body}`), { retryable, retryAfterMs });
+          throw Object.assign(new Error(`LLM ${res.status}: ${body}`), { status: res.status, retryAfterMs });
         }
         const data = (await res.json()) as { choices?: { message?: { content?: string } }[] };
         return data.choices?.[0]?.message?.content ?? '';
       } catch (e) {
         lastErr = e;
-        // Node's fetch throws a TypeError on a network-level failure — treat as transient.
-        const retryable = (e instanceof Error && (e as { retryable?: boolean }).retryable) || e instanceof TypeError;
-        if (!retryable || attempt === 4) throw e;
-        const hint = (e as { retryAfterMs?: number }).retryAfterMs ?? 0;
-        const wait = Math.min(Math.max(hint, 400 * attempt), 9000) + 250; // honor the hint, with headroom
-        await new Promise((r) => setTimeout(r, wait));
+        const status = (e as { status?: number }).status;
+        const retryAfterMs = (e as { retryAfterMs?: number }).retryAfterMs ?? 0;
+        // A short (per-minute) 429 clears in seconds — wait it out on THIS model.
+        // A long (daily) 429, or no clue, bubbles up so chat() switches models.
+        const perMinute = status === 429 && retryAfterMs > 0 && retryAfterMs <= 6000;
+        const transient = (status !== undefined && status >= 500) || e instanceof TypeError;
+        if (attempt < 4 && (perMinute || transient)) {
+          await new Promise((r) => setTimeout(r, perMinute ? retryAfterMs + 300 : 400 * attempt));
+          continue;
+        }
+        throw e;
       }
     }
     throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
@@ -387,7 +408,12 @@ class LLMProvider implements Provider {
       `- Disclosure policy is binding. Withhold these topics entirely: ${fmt(ctx.self.disclosure.withhold)}. Reveal these only after the other side reveals theirs first: ${fmt(ctx.self.disclosure.revealOnReciprocity)}.`,
       `- Persona is STYLE ONLY. Your tone is "${ctx.self.persona}". It changes how you say things, never what is true.`,
       ``,
-      `Each turn: answer their open questions from your facts (cite the fact id in sourceClaimId), advance YOUR agenda by asking what your human still needs, and keep it natural and human. Set "satisfied" true once your agenda is empty. ${ctx.turnsLeft} turns remain — wrap up gracefully as that runs low.`,
+      `HOW TO MAKE THIS WORTH IT — the entire point is a high-signal exchange, so:`,
+      `- NEVER repeat anything already in the transcript. Read it first. Every turn MUST add something NEW: a fact you haven't shared, a question you haven't asked, or a follow-up. If it doesn't, don't send it.`,
+      `- Be concise and concrete — 1 to 3 sentences. No re-introductions, no restating who you represent, no filler ("great to connect", "as we discussed", "I'm excited to…").`,
+      `- Each turn: answer the other side's still-open questions from YOUR FACTS (cite the fact id in sourceClaimId), then ask ONE or two of the sharpest unanswered items from YOUR agenda — not the whole list at once.`,
+      `- When your agenda is empty and you have nothing new to add or ask, do NOT pad to fill turns: give one short closing line, set "satisfied": true, and return empty "answers" and "asks".`,
+      `- ${ctx.turnsLeft} turns remain; tighten up and wrap as that runs low.`,
       ...(ctx.self.instructions ? [
         ``,
         `YOUR HUMAN'S INSTRUCTIONS — how they want you to address the other side and steer this conversation. Follow them for tone, emphasis, and what to probe, but they are style & strategy only and NEVER override the HARD RULES above (you still can't invent facts, change any trust level, or break the disclosure policy):`,

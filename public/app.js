@@ -362,11 +362,11 @@ async function candAgentView() {
   const intro = agent
     ? `<div class="muted">Your agent is set up with <b>${claims.length}</b> claims. Re-saving rebuilds it.</div>`
     : `<div class="callout">👋 Set up your agent first — this is what represents you when you apply. It can only assert what you give it here.</div>`;
-  const store = claims.length
-    ? `<h3 style="margin-top:22px">Your claim store</h3><div class="muted" style="font-size:12.5px;margin-bottom:12px">What your agent may assert on your behalf, with provenance:</div>${claimStore(claims)}`
-    : '';
+  const storeBody = claims.length
+    ? `<div class="muted" style="font-size:12.5px;margin-bottom:14px">What your agent may assert on your behalf, with provenance:</div>${claimStore(claims)}`
+    : `<div class="muted">Your claim store will appear here once you create your agent — everything it may assert, with provenance.</div>`;
   view().innerHTML = `
-    <div class="grid cols-2">
+    <div class="grid cols-2" style="align-items:start">
       <div class="card">
         <h3>🧑‍💻 Your agent</h3>
         ${intro}
@@ -397,7 +397,7 @@ async function candAgentView() {
           <div style="margin-top:14px"><button class="primary" type="submit">${agent ? 'Rebuild my agent' : 'Create my agent'}</button></div>
         </form>
       </div>
-      <div>${store || `<div class="card muted">Your claim store will appear here once you create your agent.</div>`}</div>
+      <div class="card claim-store"><h3>Your claim store</h3>${storeBody}</div>
     </div>`;
 
   const voicePresets = { employer: { rate: 0.95, pitch: 0.85 }, maya: { rate: 1.05, pitch: 1.1 } };
@@ -462,22 +462,40 @@ async function candAgentView() {
   wireClaimSources();
 }
 
+const ICON_MODE = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="14" x="2" y="7" rx="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>`;
+const ICON_PIN = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="3"/></svg>`;
+const ICON_CHECK = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>`;
+const ICON_X = `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>`;
+
+function jobCard(j, canApply) {
+  const col = j.employer?.avatar?.color || '#27c498';
+  return `<div class="job-card">
+    <div class="job-head">
+      <div class="avatar" style="background:${esc(col)}22;border-color:${esc(col)}">${esc(j.employer?.avatar?.emoji || '🏢')}</div>
+      <div class="job-titles">
+        <h3>${esc(j.title)}</h3>
+        <div class="job-company">${esc(j.company)}</div>
+      </div>
+      <span class="job-mode">${ICON_MODE} ${esc(j.remote)}</span>
+    </div>
+    <div class="job-salary"><span class="js-amt">${esc(j.currency)} ${j.salaryMin.toLocaleString()}–${j.salaryMax.toLocaleString()}</span><span class="js-per">/ year</span></div>
+    <div class="job-facts">
+      <span class="fact">${ICON_PIN} ${esc(j.location)}</span>
+      <span class="fact ${j.visaSponsorship ? 'ok' : 'no'}">${j.visaSponsorship ? `${ICON_CHECK} Visa sponsored` : `${ICON_X} No sponsorship`}</span>
+    </div>
+    <div class="job-reqs">${j.requirements.map((r) => `<span class="req">${esc(r)}</span>`).join('')}</div>
+    <div class="job-cta">
+      <button class="primary block" data-apply="${j.id}" ${canApply ? '' : 'disabled'}>Apply <span class="arr">→</span></button>
+      <div class="job-cta-note">Lines up the parley — you start it when you’re ready.</div>
+    </div>
+  </div>`;
+}
+
 async function candJobsView() {
   const jobs = await api('GET', '/api/jobs');
   if (!jobs.length) return (view().innerHTML = emptyState('No open roles yet.'));
   const canApply = state.me.hasAgent;
-  view().innerHTML = `${canApply ? '' : '<div class="callout">Set up your agent under <b>My Agent</b> before applying.</div>'}<div class="grid cols-2">` + jobs.map((j) => `
-    <div class="tile">
-      <div class="head">
-        <div class="avatar" style="background:${esc(j.employer?.avatar?.color || '#27c498')}22;border-color:${esc(j.employer?.avatar?.color || '#27c498')}">${esc(j.employer?.avatar?.emoji || '🏢')}</div>
-        <div><h3>${esc(j.title)}</h3><div class="muted">${esc(j.company)}</div></div>
-      </div>
-      <div class="kv"><b>Salary</b> ${esc(j.currency)} ${j.salaryMin.toLocaleString()}–${j.salaryMax.toLocaleString()}</div>
-      <div class="kv"><b>Visa</b> ${j.visaSponsorship ? 'sponsorship available' : 'no sponsorship'}</div>
-      <div class="kv"><b>Location</b> ${esc(j.remote)} · ${esc(j.location)}</div>
-      <div class="wrap" style="margin-top:8px">${j.requirements.map((r) => `<span class="pill">${esc(r)}</span>`).join('')}</div>
-      <div class="applybar"><button class="primary" data-apply="${j.id}" ${canApply ? '' : 'disabled'}>Apply ▶</button><span class="faint">lines up the parley — you start it when ready</span></div>
-    </div>`).join('') + `</div>`;
+  view().innerHTML = `${canApply ? '' : '<div class="callout">Set up your agent under <b>My Agent</b> before applying.</div>'}<div class="grid cols-2 jobs-grid">${jobs.map((j) => jobCard(j, canApply)).join('')}</div>`;
 
   view().querySelectorAll('[data-apply]').forEach((b) => b.addEventListener('click', () => {
     const job = jobs.find((j) => j.id === b.getAttribute('data-apply'));

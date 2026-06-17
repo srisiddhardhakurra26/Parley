@@ -34,6 +34,13 @@ function similar(a: string, b: string): boolean {
   return overlap >= 2 || sharedBucket;
 }
 
+/** An order-independent signature of a statement's meaningful words — used to
+ *  detect (and drop) facts that have already been disclosed, so a restated
+ *  fact never becomes a second claim and never counts as forward progress. */
+function signature(s: string): string {
+  return [...words(s)].sort().join(' ');
+}
+
 export async function runParley(jobId: string, candidateAgentId: string, hooks?: ParleyHooks): Promise<Conversation> {
   const job = store.getJob(jobId);
   if (!job) throw new Error('job not found');
@@ -63,6 +70,7 @@ export async function runParley(jobId: string, candidateAgentId: string, hooks?:
 
   const disclosed: Record<Role, Set<string>> = { candidate: new Set(), employer: new Set() };
   const satisfied: Record<Role, boolean> = { candidate: false, employer: false };
+  const seenStatements = new Set<string>(); // facts already disclosed in this parley
   let audioCursor = 0;
   let consecutiveIdle = 0;
 
@@ -118,8 +126,13 @@ export async function runParley(jobId: string, candidateAgentId: string, hooks?:
     }
 
     // The orchestrator — not the agent — writes claims from the disclosed answers.
+    // A restated fact (same signature as one already disclosed) is dropped: it
+    // doesn't become a duplicate claim and doesn't count as progress.
     const newClaims: Claim[] = [];
     for (const ans of result.answers) {
+      const sig = signature(ans.statement);
+      if (sig && seenStatements.has(sig)) continue;
+      if (sig) seenStatements.add(sig);
       newClaims.push(conversationClaim(speaker.id, ans, turn));
       for (const b of buckets(ans.statement)) disclosed[role].add(b);
       if (ans.topic) for (const b of buckets(ans.topic)) disclosed[role].add(b);
@@ -150,7 +163,10 @@ export async function runParley(jobId: string, candidateAgentId: string, hooks?:
 
     satisfied[role] = result.satisfied || conv.openAgenda[role].length === 0;
 
-    const idle = result.answers.length === 0 && result.asks.length === 0 && result.followups.length === 0;
+    // A turn only counts as progress if it surfaced a NEW fact, asked something,
+    // or kicked off a follow-up. A turn that merely restated known facts is idle,
+    // so a repetitive loop trips the stall guard instead of padding to the budget.
+    const idle = newClaims.length === 0 && result.asks.length === 0 && result.followups.length === 0;
     consecutiveIdle = idle ? consecutiveIdle + 1 : 0;
 
     conv.turns.push(turn);
