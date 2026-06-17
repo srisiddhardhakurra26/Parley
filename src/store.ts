@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { Agent, Claim, Conversation, Job, User } from './types.ts';
+import type { Agent, Claim, Conversation, DM, Job, Source, User } from './types.ts';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const DATA_DIR = join(ROOT, 'data');
@@ -19,9 +19,12 @@ interface DB {
   jobs: Record<string, Job>;
   claims: Record<string, Claim>;
   conversations: Record<string, Conversation>;
+  sources: Record<string, Source>;
+  dms: Record<string, DM>;
+  dmReads: Record<string, string>; // `${userId}::${conversationId}` → last-read ISO time
 }
 
-const empty: DB = { users: {}, agents: {}, jobs: {}, claims: {}, conversations: {} };
+const empty: DB = { users: {}, agents: {}, jobs: {}, claims: {}, conversations: {}, sources: {}, dms: {}, dmReads: {} };
 
 function load(): DB {
   if (!existsSync(DB_PATH)) return structuredClone(empty);
@@ -57,6 +60,9 @@ export const store = {
   getUserByGoogleSub(sub: string): User | undefined {
     return Object.values(db.users).find((u) => u.googleSub === sub);
   },
+  getUserByConnectorToken(token: string): User | undefined {
+    return token ? Object.values(db.users).find((u) => u.connectorToken === token) : undefined;
+  },
 
   // agents
   putAgent(a: Agent): Agent { db.agents[a.id] = a; persist(); return a; },
@@ -67,6 +73,8 @@ export const store = {
   },
   deleteAgent(agentId: string): void {
     delete db.agents[agentId];
+    // Drops the agent's claims (including any minted from sources); the Source
+    // rows are user-owned and survive — they get re-minted onto the next agent.
     for (const c of Object.values(db.claims)) if (c.subjectId === agentId) delete db.claims[c.id];
     persist();
   },
@@ -89,6 +97,10 @@ export const store = {
   getClaims(ids: string[]): Claim[] {
     return ids.map((i) => db.claims[i]).filter((c): c is Claim => Boolean(c));
   },
+  deleteClaimsBySubject(subjectId: string): void {
+    for (const c of Object.values(db.claims)) if (c.subjectId === subjectId) delete db.claims[c.id];
+    persist();
+  },
 
   // conversations
   putConversation(c: Conversation): Conversation { db.conversations[c.id] = c; persist(); return c; },
@@ -103,6 +115,29 @@ export const store = {
       return db.agents[c.employerAgentId]?.userId === userId;
     });
   },
+
+  // sources (uploaded documents, owned by a user)
+  putSource(s: Source): Source { db.sources[s.id] = s; persist(); return s; },
+  getSource(sourceId: string): Source | undefined { return db.sources[sourceId]; },
+  sourcesByUser(userId: string): Source[] {
+    return Object.values(db.sources).filter((s) => s.ownerUserId === userId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  },
+  deleteSource(sourceId: string): void {
+    const s = db.sources[sourceId];
+    if (!s) return;
+    for (const cid of s.claimIds) delete db.claims[cid]; // its document-backed claims die with it
+    delete db.sources[sourceId];
+    persist();
+  },
+
+  // direct messages (per parley)
+  addDM(m: DM): DM { db.dms[m.id] = m; persist(); return m; },
+  dmsByConversation(convId: string): DM[] {
+    return Object.values(db.dms).filter((m) => m.conversationId === convId).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  },
+  // read state for unread-message notifications
+  markRead(userId: string, convId: string, atISO: string): void { db.dmReads[`${userId}::${convId}`] = atISO; persist(); },
+  lastRead(userId: string, convId: string): string | undefined { return db.dmReads[`${userId}::${convId}`]; },
 
   // test/dev helpers
   reset(): void { db = structuredClone(empty); persist(); },

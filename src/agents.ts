@@ -5,6 +5,7 @@
 
 import { attachVerification, makeClaim } from './claims.ts';
 import { id, now, store } from './store.ts';
+import { mintUserSourcesOntoAgent } from './sources.ts';
 import type { Agent, Claim, DisclosurePolicy, Job, Role } from './types.ts';
 import type { User, UserProfile } from './types.ts';
 import type { Fact } from './provider.ts';
@@ -43,6 +44,7 @@ export interface CandidateSetup {
   principalName: string;
   displayName?: string;
   persona?: string;
+  instructions?: string;
   voice?: Agent['voice'];
   avatar?: Agent['avatar'];
   years: number;
@@ -60,6 +62,7 @@ export interface EmployerSetup {
   principalName: string;
   displayName?: string;
   persona?: string;
+  instructions?: string;
   voice?: Agent['voice'];
   avatar?: Agent['avatar'];
   company: string;
@@ -76,7 +79,7 @@ export interface EmployerSetup {
   agenda?: string[];
 }
 
-function baseAgent(role: Role, s: { principalName: string; displayName?: string; persona?: string; voice?: Agent['voice']; avatar?: Agent['avatar']; disclosure?: DisclosurePolicy; agenda?: string[] }, userId?: string): Agent {
+function baseAgent(role: Role, s: { principalName: string; displayName?: string; persona?: string; instructions?: string; voice?: Agent['voice']; avatar?: Agent['avatar']; disclosure?: DisclosurePolicy; agenda?: string[] }, userId?: string): Agent {
   return {
     id: id('agt'),
     userId,
@@ -86,14 +89,16 @@ function baseAgent(role: Role, s: { principalName: string; displayName?: string;
     avatar: s.avatar ?? (role === 'candidate' ? { emoji: '🧑‍💻', color: '#6c8cff' } : { emoji: '🏢', color: '#27c498' }),
     voice: s.voice ?? (role === 'candidate' ? { name: 'candidate', rate: 1, pitch: 1 } : { name: 'employer', rate: 0.95, pitch: 0.85 }),
     persona: s.persona ?? (role === 'candidate' ? 'warm and straightforward' : 'professional and friendly'),
+    instructions: s.instructions?.trim() || undefined,
     disclosure: s.disclosure ?? DEFAULT_DISCLOSURE[role],
     agenda: s.agenda ?? DEFAULT_AGENDA[role],
     createdAt: now(),
   };
 }
 
-export function createCandidate(s: CandidateSetup, userId?: string): { agent: Agent; claims: Claim[] } {
+export function createCandidate(s: CandidateSetup, userId?: string, reuseAgentId?: string): { agent: Agent; claims: Claim[] } {
   const agent = baseAgent('candidate', s, userId);
+  if (reuseAgentId) agent.id = reuseAgentId; // keep the id so existing parleys stay linked
   store.putAgent(agent);
 
   const claims: Claim[] = [];
@@ -189,16 +194,26 @@ export function createEmployer(s: EmployerSetup, userId?: string): { agent: Agen
 export function saveCandidateProfile(userId: string, s: CandidateSetup): Agent {
   const user = store.getUser(userId);
   if (!user || user.role !== 'candidate') throw new Error('not a candidate account');
-  if (user.agentId) store.deleteAgent(user.agentId); // re-save replaces the old store
+  // Rebuild in place: keep the same agent id (so past parleys stay linked to this
+  // candidate) but drop and re-mint its claim store from the new inputs.
+  const reuseId = user.agentId;
+  if (reuseId) store.deleteClaimsBySubject(reuseId);
 
   const setup: CandidateSetup = {
     ...s,
     principalName: user.displayName,
     displayName: `${user.displayName}'s agent`,
   };
-  const { agent } = createCandidate(setup, userId);
+  const { agent } = createCandidate(setup, userId, reuseId);
   user.agentId = agent.id;
+  // Keep the raw inputs so a later partial update (web or MCP) merges instead of wiping.
+  user.candidateInputs = {
+    years: s.years, skills: s.skills, education: s.education, experience: s.experience,
+    projects: s.projects, github: s.github, githubVerifiedSkills: s.githubVerifiedSkills,
+    instructions: s.instructions, disclosure: s.disclosure, voice: s.voice, avatar: s.avatar,
+  };
   store.putUser(user);
+  mintUserSourcesOntoAgent(userId, agent.id); // re-attach uploaded documents to the rebuilt agent
   return agent;
 }
 
@@ -221,6 +236,7 @@ export interface JobSetup {
   requirements: string[];
   notes?: string[];
   company?: string; // optional per-posting override of the profile company
+  instructions?: string; // optional per-posting steering override
 }
 
 /** Post a job: spins up a recruiting agent for it from the employer's defaults. */
@@ -234,6 +250,7 @@ export function postJob(userId: string, j: JobSetup): { agent: Agent; job: Job }
     principalName: user.displayName,
     displayName: `${company} recruiting agent`,
     persona: p.persona,
+    instructions: j.instructions ?? p.instructions,
     voice: p.voice,
     avatar: p.avatar,
     disclosure: p.disclosure,
@@ -249,6 +266,7 @@ export function postJob(userId: string, j: JobSetup): { agent: Agent; job: Job }
     notes: j.notes,
   };
   const { agent, job } = createEmployer(setup, userId);
+  mintUserSourcesOntoAgent(userId, agent.id); // attach the employer's uploaded documents to this posting's agent
   return { agent, job };
 }
 

@@ -1,23 +1,26 @@
 import './env.ts'; // load .env before any module reads process.env
 import express from 'express';
 import type { Request, Response } from 'express';
+import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { claimView } from './claims.ts';
 import { postJob, saveCandidateProfile, saveEmployerProfile } from './agents.ts';
+import { createSource, mintSourceOntoAgent, sourceView } from './sources.ts';
+import { handleMcp } from './mcp.ts';
 import { runParley } from './orchestrator.ts';
 import { getProvider } from './provider.ts';
-import { store } from './store.ts';
+import { id, now, store } from './store.ts';
 import { seed, DEMO } from './seed.ts';
 import {
   clearSession, createAccount, currentUser, googleConfigured, publicUser,
   setSession, verifyGoogleIdToken, verifyPassword,
 } from './auth.ts';
-import type { Agent, Claim, Conversation, Role, Turn, User } from './types.ts';
+import type { Agent, Claim, Conversation, DM, Role, Turn, User } from './types.ts';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const app = express();
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({ limit: '12mb' })); // allow base64 file uploads
 
 // ── auth guards ───────────────────────────────────────────────────────────────
 
@@ -31,6 +34,28 @@ function roled(req: Request, res: Response, role: Role): User | null {
   if (!u) return null;
   if (u.role !== role) { res.status(403).json({ error: `this action needs a ${role} account` }); return null; }
   return u;
+}
+
+/** Which side of a parley a user is on (or null if they're not a participant). */
+function convParticipant(conv: Conversation, userId: string): Role | null {
+  if (store.getAgent(conv.candidateAgentId)?.userId === userId) return 'candidate';
+  if (store.getAgent(conv.employerAgentId)?.userId === userId) return 'employer';
+  return null;
+}
+/** Have these two users met across the table in some parley? (gates source access) */
+function sharesConversation(a: string, b: string): boolean {
+  return store.listConversations().some((c) => {
+    const cu = store.getAgent(c.candidateAgentId)?.userId;
+    const eu = store.getAgent(c.employerAgentId)?.userId;
+    return (cu === a && eu === b) || (cu === b && eu === a);
+  });
+}
+function viewDM(m: DM, meId: string) {
+  const from = store.getUser(m.fromUserId);
+  return {
+    id: m.id, kind: m.kind, text: m.text, callUrl: m.callUrl, callTime: m.callTime,
+    fromRole: m.fromRole, fromName: from?.displayName ?? 'Someone', mine: m.fromUserId === meId, createdAt: m.createdAt,
+  };
 }
 
 // ── serializers ───────────────────────────────────────────────────────────────
@@ -266,6 +291,53 @@ app.get('/api/me/applicants', (req, res) => {
   res.json(store.conversationsForUser(u.id, 'employer').map(summarizeConv));
 });
 
+// ── sources (uploaded documents → RAG in the parley + provenance in reports) ────
+
+app.get('/api/me/sources', (req, res) => {
+  const u = auth(req, res); if (!u) return;
+  res.json(store.sourcesByUser(u.id).map(sourceView));
+});
+
+app.post('/api/me/sources', (req, res) => {
+  const u = auth(req, res); if (!u) return;
+  const { title, kind, text, fileName, mimeType, dataBase64 } = req.body ?? {};
+  if (!String(text ?? '').trim() && !dataBase64) return res.status(400).json({ error: 'add some text or attach a file' });
+  try {
+    if (u.role === 'candidate') {
+      // Mints onto the candidate's standing agent (or waits for one to be created).
+      const src = createSource(u.id, u.agentId, { title, kind, text, fileName, mimeType, dataBase64 });
+      return res.json({ source: sourceView(src) });
+    }
+    // Employer: store once, attach to every current posting's recruiting agent.
+    const src = createSource(u.id, undefined, { title, kind, text, fileName, mimeType, dataBase64 });
+    for (const job of store.jobsByEmployerUser(u.id)) mintSourceOntoAgent(src.id, job.employerAgentId);
+    res.json({ source: sourceView(src) });
+  } catch (e) { res.status(400).json({ error: e instanceof Error ? e.message : String(e) }); }
+});
+
+app.delete('/api/me/sources/:id', (req, res) => {
+  const u = auth(req, res); if (!u) return;
+  const s = store.getSource(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  if (s.ownerUserId !== u.id) return res.status(403).json({ error: 'not your source' });
+  store.deleteSource(s.id);
+  res.json({ ok: true });
+});
+
+app.get('/api/sources/:id/raw', (req, res) => {
+  const u = auth(req, res); if (!u) return;
+  const s = store.getSource(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  if (s.ownerUserId !== u.id && !sharesConversation(u.id, s.ownerUserId)) return res.status(403).json({ error: 'not allowed' });
+  if (s.dataBase64) {
+    res.setHeader('Content-Type', s.mimeType || 'application/octet-stream');
+    res.setHeader('Content-Disposition', `inline; filename="${(s.fileName || s.title).replace(/["\r\n]/g, '')}"`);
+    return res.end(Buffer.from(s.dataBase64, 'base64'));
+  }
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.end(s.text || '(no extracted text)');
+});
+
 // ── shared: a single parley (participants only, own report only) ───────────────
 
 app.get('/api/conversations/:id', (req, res) => {
@@ -277,6 +349,99 @@ app.get('/api/conversations/:id', (req, res) => {
   if (!isCand && !isEmp) return res.status(403).json({ error: 'not your parley' });
   res.json(viewConversation(conv, u.role));
 });
+
+// ── direct messages + live call (the humans connect after their agents parley) ──
+
+app.get('/api/conversations/:id/dms', (req, res) => {
+  const u = auth(req, res); if (!u) return;
+  const conv = store.getConversation(req.params.id);
+  if (!conv || !convParticipant(conv, u.id)) return res.status(conv ? 403 : 404).json({ error: conv ? 'not your parley' : 'not found' });
+  res.json(store.dmsByConversation(conv.id).map((m) => viewDM(m, u.id)));
+});
+
+app.post('/api/conversations/:id/dms', (req, res) => {
+  const u = auth(req, res); if (!u) return;
+  const conv = store.getConversation(req.params.id);
+  const role = conv ? convParticipant(conv, u.id) : null;
+  if (!conv || !role) return res.status(conv ? 403 : 404).json({ error: conv ? 'not your parley' : 'not found' });
+  const text = String(req.body?.text ?? '').trim();
+  if (!text) return res.status(400).json({ error: 'empty message' });
+  // The first message opens the thread (a request to connect).
+  if (store.dmsByConversation(conv.id).length === 0) {
+    store.addDM({ id: id('dm'), conversationId: conv.id, fromUserId: u.id, fromRole: role, kind: 'system', text: `${u.displayName} started a direct conversation.`, createdAt: now() });
+  }
+  const m = store.addDM({ id: id('dm'), conversationId: conv.id, fromUserId: u.id, fromRole: role, kind: 'message', text, createdAt: now() });
+  res.json({ message: viewDM(m, u.id) });
+});
+
+app.post('/api/conversations/:id/call', (req, res) => {
+  const u = auth(req, res); if (!u) return;
+  const conv = store.getConversation(req.params.id);
+  const role = conv ? convParticipant(conv, u.id) : null;
+  if (!conv || !role) return res.status(conv ? 403 : 404).json({ error: conv ? 'not your parley' : 'not found' });
+  const callUrl = `https://meet.jit.si/Parley-${conv.id}`; // a real, free, no-signup video room
+  const raw = req.body?.time ? new Date(String(req.body.time)) : new Date(Date.now() + 30 * 60 * 1000);
+  const callTime = isNaN(raw.getTime()) ? undefined : raw.toISOString();
+  const m = store.addDM({
+    id: id('dm'), conversationId: conv.id, fromUserId: u.id, fromRole: role, kind: 'call',
+    text: `${u.displayName} sent a link to hop on a live video call.`, callUrl, callTime, createdAt: now(),
+  });
+  res.json({ message: viewDM(m, u.id) });
+});
+
+// ── notifications (unread direct messages) ─────────────────────────────────────
+
+app.get('/api/notifications', (req, res) => {
+  const u = auth(req, res); if (!u) return;
+  const convs = u.role === 'candidate' ? store.conversationsForUser(u.id, 'candidate') : store.conversationsForUser(u.id, 'employer');
+  let total = 0;
+  const items: unknown[] = [];
+  for (const c of convs) {
+    const dms = store.dmsByConversation(c.id);
+    if (!dms.length) continue;
+    const lastReadAt = store.lastRead(u.id, c.id) ?? '';
+    const unread = dms.filter((m) => m.fromUserId !== u.id && m.kind !== 'system' && m.createdAt > lastReadAt);
+    if (!unread.length) continue;
+    total += unread.length;
+    const last = dms[dms.length - 1]!;
+    const role = convParticipant(c, u.id);
+    const otherName = role === 'candidate' ? store.getAgent(c.employerAgentId)?.principalName : store.getAgent(c.candidateAgentId)?.principalName;
+    items.push({
+      conversationId: c.id, jobTitle: store.getJob(c.jobId)?.title, otherName: otherName ?? 'Someone',
+      unread: unread.length, lastText: last.kind === 'call' ? '📹 Sent a video-call link' : last.text, lastAt: last.createdAt,
+    });
+  }
+  items.sort((a, b) => String((b as { lastAt: string }).lastAt).localeCompare(String((a as { lastAt: string }).lastAt)));
+  res.json({ total, items });
+});
+
+app.post('/api/conversations/:id/read', (req, res) => {
+  const u = auth(req, res); if (!u) return;
+  const conv = store.getConversation(req.params.id);
+  if (!conv || !convParticipant(conv, u.id)) return res.status(conv ? 403 : 404).json({ error: conv ? 'not your parley' : 'not found' });
+  store.markRead(u.id, conv.id, now());
+  res.json({ ok: true });
+});
+
+// ── MCP connector (per-user token + Streamable-HTTP endpoint) ───────────────────
+
+const connectorUrl = (req: Request, token: string) => `${req.protocol}://${req.get('host')}/mcp/${token}`;
+
+app.get('/api/me/connector', (req, res) => {
+  const u = auth(req, res); if (!u) return;
+  if (!u.connectorToken) { u.connectorToken = `pk_${randomUUID().replace(/-/g, '')}`; store.putUser(u); }
+  res.json({ token: u.connectorToken, url: connectorUrl(req, u.connectorToken), role: u.role });
+});
+
+app.post('/api/me/connector/regenerate', (req, res) => {
+  const u = auth(req, res); if (!u) return;
+  u.connectorToken = `pk_${randomUUID().replace(/-/g, '')}`;
+  store.putUser(u);
+  res.json({ token: u.connectorToken, url: connectorUrl(req, u.connectorToken), role: u.role });
+});
+
+// The MCP endpoint itself (auth is the token in the path).
+app.all('/mcp/:token', handleMcp);
 
 // ── dev helpers ────────────────────────────────────────────────────────────────
 

@@ -17,6 +17,7 @@ const MAX_TURNS = 14; // ~7 each — the budget that keeps two LLMs from ramblin
 /** Optional observer so a caller (e.g. the SSE endpoint) can watch the parley
  *  unfold turn-by-turn instead of only seeing the finished conversation. */
 export interface ParleyHooks {
+  onStart?: (conversationId: string) => void;
   onTurn?: (turn: Turn, speaker: Agent) => void | Promise<void>;
 }
 
@@ -58,6 +59,7 @@ export async function runParley(jobId: string, candidateAgentId: string, hooks?:
     updatedAt: now(),
   };
   store.putConversation(conv);
+  hooks?.onStart?.(conv.id);
 
   const disclosed: Record<Role, Set<string>> = { candidate: new Set(), employer: new Set() };
   const satisfied: Record<Role, boolean> = { candidate: false, employer: false };
@@ -77,6 +79,7 @@ export async function runParley(jobId: string, candidateAgentId: string, hooks?:
         role,
         displayName: speaker.displayName,
         persona: speaker.persona,
+        instructions: speaker.instructions,
         agendaOpen: conv.openAgenda[role],
         disclosure: speaker.disclosure,
         facts: factsFor(speaker.id),

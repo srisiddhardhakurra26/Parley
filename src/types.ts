@@ -103,8 +103,51 @@ export interface Agent {
   avatar: Avatar;
   voice: Voice;
   persona: string;         // tone the agent speaks in — style only, never substance
+  /** Free-text steering from the human: how to address the other side, what to
+   *  emphasise, how to keep the conversation. Strategy/style only — it never
+   *  overrides the hard rules (can't invent facts, can't change tiers, disclosure binding). */
+  instructions?: string;
   disclosure: DisclosurePolicy;
   agenda: string[];        // what its human wants to find out from the other side
+  createdAt: string;
+}
+
+// ── Sources (uploaded documents — resume, certificates …) ────────────────────
+
+export type SourceKind = 'resume' | 'certificate' | 'portfolio' | 'reference' | 'other';
+
+/**
+ * A document a human uploads for their agent. Its text is chunked and turned
+ * into document-backed claims, so it can be retrieved (RAG) during the parley
+ * and linked, with provenance, in the report.
+ */
+export interface Source {
+  id: string;
+  ownerUserId: string;     // the human who uploaded it (survives agent rebuilds)
+  title: string;
+  kind: SourceKind;
+  fileName?: string;
+  mimeType?: string;
+  dataBase64?: string;     // the raw upload, for download/linking (kept small)
+  text: string;            // extracted/pasted text used for RAG
+  chunks: string[];        // retrievable text chunks
+  claimIds: string[];      // the document-backed claims minted from this source (across agents)
+  createdAt: string;
+}
+
+// ── Direct messages (human ↔ human, after the agents have parleyed) ───────────
+
+export type DMKind = 'message' | 'system' | 'call';
+
+export interface DM {
+  id: string;
+  conversationId: string;  // the parley this thread hangs off
+  fromUserId: string;
+  fromRole: Role;
+  kind: DMKind;
+  text: string;
+  callUrl?: string;        // for kind 'call' — a live video room link
+  callTime?: string;       // suggested time (ISO) for the call
   createdAt: string;
 }
 
@@ -114,9 +157,26 @@ export interface Agent {
 export interface UserProfile {
   company?: string;
   persona?: string;
+  instructions?: string;   // steering for the recruiting agent, applied to each posting
   voice?: Voice;
   avatar?: Avatar;
   disclosure?: DisclosurePolicy;
+}
+
+/** The raw fields a candidate entered, kept so updates (web or MCP) can merge
+ *  rather than wipe — the claim store is rebuilt from these each time. */
+export interface CandidateInputs {
+  years?: number;
+  skills?: string[];
+  education?: string;
+  experience?: string[];
+  projects?: string[];
+  github?: string;
+  githubVerifiedSkills?: string[];
+  instructions?: string;
+  disclosure?: DisclosurePolicy;
+  voice?: Voice;
+  avatar?: Avatar;
 }
 
 export interface User {
@@ -129,6 +189,8 @@ export interface User {
   googleSub?: string;      // Google account id, if linked
   agentId?: string;        // a candidate's single standing agent
   profile?: UserProfile;   // an employer's recruiting-agent defaults
+  candidateInputs?: CandidateInputs; // raw candidate setup, for merge-updates
+  connectorToken?: string; // bearer token for this user's MCP connector
   createdAt: string;
 }
 
