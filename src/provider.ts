@@ -93,6 +93,8 @@ export interface Provider {
   inferRead(ctx: ReadContext): Promise<string>;
   resolveFollowup(ctx: FollowupContext): Promise<string>;
   extractResume(text: string): Promise<ResumeFields>;
+  /** Draft a short "how should my agent talk" instruction from a profile summary. */
+  suggestInstructions(summary: string): Promise<string>;
 }
 
 // ── helpers shared by both providers ─────────────────────────────────────────
@@ -172,6 +174,12 @@ function ghHandle(s?: string): string | undefined {
   if (!s) return undefined;
   const h = String(s).replace(/.*github\.com\//i, '').replace(/^@/, '').replace(/\/.*$/, '').trim();
   return h || undefined;
+}
+
+/** A sensible default agent instruction, derived from the profile (no LLM). */
+function fallbackInstructions(summary: string): string {
+  const skill = (summary.match(/skills?:\s*([^\n,;]+)/i)?.[1] || 'your strongest area').trim();
+  return `Be warm, concise and confident. Lead with your depth in ${skill}, and back every claim with a concrete outcome. Ask early about team size, on-call load, and growth path — get a real sense of the role before discussing compensation.`;
 }
 
 /** A no-LLM résumé parse (also the fallback if the model hiccups). */
@@ -275,6 +283,10 @@ class MockProvider implements Provider {
 
   async extractResume(text: string): Promise<ResumeFields> {
     return heuristicExtract(text);
+  }
+
+  async suggestInstructions(summary: string): Promise<string> {
+    return fallbackInstructions(summary);
   }
 }
 
@@ -478,6 +490,22 @@ class LLMProvider implements Provider {
     } catch (e) {
       console.warn(`[parley] extractResume fell back: ${e instanceof Error ? e.message : e}`);
       return base;
+    }
+  }
+
+  async suggestInstructions(summary: string): Promise<string> {
+    const system = [
+      "You write the steering instruction for a job-seeker's AI agent — how it should talk to employers and what to emphasise, based on their background.",
+      'Style and strategy ONLY (tone, which strengths to lead with, what to probe, what to be careful about) — never invent facts.',
+      'Write 2–4 sentences, ~50 words max, second-person imperative ("Lead with…", "Be…", "Ask about…"). Output only the instruction text — no preamble, no quotes.',
+    ].join('\n');
+    try {
+      const raw = await this.chat([{ role: 'system', content: system }, { role: 'user', content: `CANDIDATE BACKGROUND:\n${summary}` }], 220, false, 0.4);
+      const out = raw.trim().replace(/^["']|["']$/g, '').trim();
+      return out || fallbackInstructions(summary);
+    } catch (e) {
+      console.warn(`[parley] suggestInstructions fell back: ${e instanceof Error ? e.message : e}`);
+      return fallbackInstructions(summary);
     }
   }
 }

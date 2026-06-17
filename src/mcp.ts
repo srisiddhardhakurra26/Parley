@@ -8,8 +8,9 @@
 
 import type { Request, Response } from 'express';
 import { id, now, store } from './store.ts';
-import { postJob, saveCandidateProfile } from './agents.ts';
-import { createSource } from './sources.ts';
+import { postJob, saveCandidateProfile, saveEmployerProfile } from './agents.ts';
+import { createSource, sourceView } from './sources.ts';
+import { getProvider } from './provider.ts';
 import { runParley } from './orchestrator.ts';
 import { tierOf, TIER_LABEL } from './claims.ts';
 import type { Conversation, Job, Role, User } from './types.ts';
@@ -66,7 +67,7 @@ interface Tool {
   description: string;
   roles?: Role[]; // omit = available to both
   inputSchema: Record<string, unknown>;
-  run: (user: User, args: Args) => unknown;
+  run: (user: User, args: Args) => unknown | Promise<unknown>;
 }
 
 const S = (description: string) => ({ type: 'string', description });
@@ -108,17 +109,38 @@ const TOOLS: Tool[] = [
     run: (u) => store.conversationsForUser(u.id, 'candidate').map(convSummary),
   },
   {
+    name: 'get_my_profile',
+    description: 'Read your current candidate profile (years, skills, education, experience, projects, GitHub, agent instructions, withheld topics) and your uploaded documents. Call this before update_candidate_profile so you can preserve what is already there.',
+    roles: ['candidate'],
+    inputSchema: { type: 'object', properties: {} },
+    run: (u) => {
+      const i = u.candidateInputs ?? {};
+      const agent = u.agentId ? store.getAgent(u.agentId) : undefined;
+      return {
+        hasAgent: Boolean(u.agentId),
+        years: i.years, skills: i.skills ?? [], education: i.education ?? '',
+        experience: i.experience ?? [], projects: i.projects ?? [], github: i.github,
+        instructions: agent?.instructions ?? i.instructions ?? '',
+        withhold: i.disclosure?.withhold ?? [],
+        documents: store.sourcesByUser(u.id).map((s) => ({ id: s.id, title: s.title, kind: s.kind })),
+      };
+    },
+  },
+  {
     name: 'update_candidate_profile',
-    description: 'Create or update your candidate profile. Only pass the fields you want to change — the rest are preserved. Rebuilds the claim store your agent speaks from.',
+    description: 'Create or update your candidate profile. Pass only the fields you want to change — the rest are preserved. To ADD to a list without losing existing items, use addSkills / addProjects / addExperience (these append). Use the plain skills/projects/experience fields only to REPLACE the whole list. Rebuilds the claim store your agent speaks from.',
     roles: ['candidate'],
     inputSchema: {
       type: 'object',
       properties: {
         years: NUM('Years of professional experience.'),
-        skills: ARR('Skills, e.g. ["Go","Kubernetes"].'),
+        skills: ARR('REPLACE the whole skills list.'),
+        addSkills: ARR('APPEND these skills to the existing list.'),
         education: S('Education, e.g. "MS Computer Science, Georgia Tech".'),
-        experience: ARR('Experience highlights, one per item.'),
-        projects: ARR('Notable projects, one per item.'),
+        experience: ARR('REPLACE the whole experience list.'),
+        addExperience: ARR('APPEND these experience items.'),
+        projects: ARR('REPLACE the whole projects list.'),
+        addProjects: ARR('APPEND these projects to the existing list.'),
         github: S('GitHub handle (optional).'),
         instructions: S('How your agent should talk & what to emphasise (style/strategy only).'),
         withhold: ARR('Topics your agent must never disclose, e.g. ["current salary"].'),
@@ -126,13 +148,14 @@ const TOOLS: Tool[] = [
     },
     run: (u, a) => {
       const cur = u.candidateInputs ?? {};
+      const merge = (replace?: string[], add?: string[], base?: string[]) => replace ?? (add && add.length ? [...(base ?? []), ...add] : base);
       const agent = saveCandidateProfile(u.id, {
         principalName: u.displayName,
         years: a.years ?? cur.years ?? 0,
-        skills: a.skills ?? cur.skills ?? [],
+        skills: merge(a.skills, a.addSkills, cur.skills) ?? [],
         education: a.education ?? cur.education ?? '',
-        experience: a.experience ?? cur.experience ?? [],
-        projects: a.projects ?? cur.projects ?? [],
+        experience: merge(a.experience, a.addExperience, cur.experience) ?? [],
+        projects: merge(a.projects, a.addProjects, cur.projects) ?? [],
         github: a.github ?? cur.github,
         githubVerifiedSkills: a.githubVerifiedSkills ?? cur.githubVerifiedSkills,
         instructions: a.instructions ?? cur.instructions,
@@ -144,7 +167,69 @@ const TOOLS: Tool[] = [
           revealOnReciprocity: ['target compensation', 'competing offers'],
         },
       });
-      return { ok: true, agentId: agent.id, message: 'Candidate profile saved and claim store rebuilt.' };
+      return { ok: true, agentId: agent.id, projects: merge(a.projects, a.addProjects, cur.projects), message: 'Candidate profile saved and claim store rebuilt.' };
+    },
+  },
+  {
+    name: 'import_resume',
+    description: 'Parse a résumé (full text) and merge the extracted fields — years, skills, education, experience, projects, GitHub — into your candidate profile. Use this when the user shares a résumé and wants their profile filled or refreshed from it.',
+    roles: ['candidate'],
+    inputSchema: { type: 'object', properties: { text: S('The full résumé text.') }, required: ['text'] },
+    run: async (u, a) => {
+      if (!String(a.text ?? '').trim()) throw new Error('Provide the résumé text.');
+      const f = await getProvider().extractResume(a.text);
+      const cur = u.candidateInputs ?? {};
+      saveCandidateProfile(u.id, {
+        principalName: u.displayName,
+        years: f.years ?? cur.years ?? 0,
+        skills: f.skills ?? cur.skills ?? [],
+        education: f.education ?? cur.education ?? '',
+        experience: f.experience ?? cur.experience ?? [],
+        projects: f.projects ?? cur.projects ?? [],
+        github: f.github ?? cur.github,
+        instructions: cur.instructions,
+        voice: cur.voice,
+        avatar: cur.avatar,
+        disclosure: cur.disclosure ?? { freelyShare: ['skills', 'experience', 'education', 'projects', 'availability'], withhold: ['current salary'], revealOnReciprocity: ['target compensation', 'competing offers'] },
+      });
+      return { ok: true, extracted: f, message: 'Résumé parsed and profile updated.' };
+    },
+  },
+  {
+    name: 'suggest_agent_instructions',
+    description: 'Draft a short "how my agent should talk & answer" steering instruction from your profile. Returns the text — pass it to update_candidate_profile (instructions) to save it.',
+    roles: ['candidate'],
+    inputSchema: { type: 'object', properties: {} },
+    run: async (u) => {
+      const i = u.candidateInputs ?? {};
+      const summary = [
+        i.years != null ? `Years of experience: ${i.years}` : '',
+        i.skills?.length ? `Skills: ${i.skills.join(', ')}` : '',
+        i.education ? `Education: ${i.education}` : '',
+        i.experience?.length ? `Experience:\n- ${i.experience.join('\n- ')}` : '',
+        i.projects?.length ? `Projects:\n- ${i.projects.join('\n- ')}` : '',
+      ].filter(Boolean).join('\n');
+      if (!summary.trim()) throw new Error('Set up your profile first (use update_candidate_profile or import_resume).');
+      return { instructions: await getProvider().suggestInstructions(summary) };
+    },
+  },
+  {
+    name: 'list_documents',
+    description: 'List the documents (résumé, certificates, references…) attached to your candidate agent.',
+    roles: ['candidate'],
+    inputSchema: { type: 'object', properties: {} },
+    run: (u) => store.sourcesByUser(u.id).map(sourceView),
+  },
+  {
+    name: 'delete_document',
+    description: 'Delete one of your uploaded documents by id (from list_documents).',
+    roles: ['candidate'],
+    inputSchema: { type: 'object', properties: { documentId: S('Document id.') }, required: ['documentId'] },
+    run: (u, a) => {
+      const s = store.getSource(a.documentId);
+      if (!s || s.ownerUserId !== u.id) throw new Error('No such document of yours.');
+      store.deleteSource(s.id);
+      return { ok: true, message: 'Document deleted.' };
     },
   },
   {
@@ -193,6 +278,34 @@ const TOOLS: Tool[] = [
         requirements: a.requirements ?? [], notes: a.notes, instructions: a.instructions, company: a.company,
       });
       return { ok: true, jobId: job.id, title: job.title, message: 'Job posted and live for candidates.' };
+    },
+  },
+  {
+    name: 'get_my_recruiting_agent',
+    description: 'Read your recruiting-agent defaults: company, persona/tone, and steering instructions (applied to every posting).',
+    roles: ['employer'],
+    inputSchema: { type: 'object', properties: {} },
+    run: (u) => { const p = u.profile ?? {}; return { company: p.company ?? '', persona: p.persona ?? '', instructions: p.instructions ?? '' }; },
+  },
+  {
+    name: 'update_recruiting_agent',
+    description: 'Update your recruiting-agent defaults. Pass only the fields you want to change. Applies to future postings.',
+    roles: ['employer'],
+    inputSchema: {
+      type: 'object',
+      properties: {
+        company: S('Company name.'),
+        persona: S('Tone/persona — style only, never changes facts.'),
+        instructions: S('How your recruiting agent should steer conversations (what to probe, how warm, etc.).'),
+      },
+    },
+    run: (u, a) => {
+      const patch: { company?: string; persona?: string; instructions?: string } = {};
+      if (a.company != null) patch.company = String(a.company);
+      if (a.persona != null) patch.persona = String(a.persona);
+      if (a.instructions != null) patch.instructions = String(a.instructions);
+      saveEmployerProfile(u.id, patch);
+      return { ok: true, message: 'Recruiting-agent defaults updated. Applies to new postings.' };
     },
   },
   {
@@ -251,7 +364,7 @@ function toolsFor(user: User): Tool[] {
 const ok = (id: unknown, result: unknown) => ({ jsonrpc: '2.0', id, result });
 const rpcErr = (id: unknown, code: number, message: string) => ({ jsonrpc: '2.0', id, error: { code, message } });
 
-function dispatch(user: User, msg: any): unknown {
+async function dispatch(user: User, msg: any): Promise<unknown> {
   const { id: rid, method, params } = msg;
   if (method === 'initialize') {
     return ok(rid, {
@@ -272,7 +385,7 @@ function dispatch(user: User, msg: any): unknown {
     const tool = toolsFor(user).find((t) => t.name === params?.name);
     if (!tool) return rpcErr(rid, -32602, `unknown tool: ${params?.name}`);
     try {
-      const out = tool.run(user, params?.arguments ?? {});
+      const out = await tool.run(user, params?.arguments ?? {});
       return ok(rid, { content: [{ type: 'text', text: typeof out === 'string' ? out : JSON.stringify(out, null, 2) }] });
     } catch (e) {
       return ok(rid, { content: [{ type: 'text', text: `Error: ${e instanceof Error ? e.message : String(e)}` }], isError: true });
@@ -283,7 +396,7 @@ function dispatch(user: User, msg: any): unknown {
 }
 
 /** Express handler for /mcp/:token (POST = JSON-RPC; GET/DELETE = not offered). */
-export function handleMcp(req: Request, res: Response): void {
+export async function handleMcp(req: Request, res: Response): Promise<void> {
   const user = store.getUserByConnectorToken(req.params.token ?? '');
   if (!user) { res.status(401).json(rpcErr(null, -32001, 'invalid connector token')); return; }
   if (req.method !== 'POST') { res.status(405).json(rpcErr(null, -32000, 'use POST (Streamable HTTP)')); return; }
@@ -295,7 +408,7 @@ export function handleMcp(req: Request, res: Response): void {
   // Notifications (no id) get acknowledged with 202 and no body.
   if (msg.id === undefined || msg.id === null) { res.status(202).end(); return; }
 
-  const payload = dispatch(user, msg);
+  const payload = await dispatch(user, msg);
 
   // Content negotiation: SSE only if the client won't take plain JSON.
   const accept = String(req.headers.accept || '');

@@ -153,6 +153,22 @@ function claimCard(c) {
   </div>`;
 }
 
+// The candidate's own claim store, grouped into collapsible sections.
+function claimStore(claims) {
+  const sorted = claims.slice().sort((a, b) => b.rank - a.rank);
+  const self = sorted.filter((c) => c.source === 'self_stated');
+  const surfaced = sorted.filter((c) => c.source === 'document' || c.source === 'third_party');
+  const other = sorted.filter((c) => !['self_stated', 'document', 'third_party'].includes(c.source));
+  const group = (title, sub, items, open) => items.length ? `
+    <details class="claim-group"${open ? ' open' : ''}>
+      <summary><span class="cg-chev">▸</span><span class="cg-title">${title}</span><span class="cg-count">${items.length}</span></summary>
+      <div class="cg-body">${sub ? `<div class="cg-sub muted">${sub}</div>` : ''}${items.map(claimCard).join('')}</div>
+    </details>` : '';
+  return group('You stated these', 'Facts you entered yourself.', self, true)
+    + group('Identified from your documents &amp; connectors', 'Surfaced from your résumé, GitHub and other sources.', surfaced, true)
+    + group('Other', '', other, false);
+}
+
 // Brand mark — a scales-of-justice (Parley = balance/negotiation). Gradient for
 // the header, plain currentColor for the coloured auth hero.
 const LOGO_PATHS = `<path d="m16 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z"/><path d="m2 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z"/><path d="M7 21h10"/><path d="M12 3v18"/><path d="M3 7h2c2 0 5-1 7-2 2 1 5 2 7 2h2"/>`;
@@ -347,7 +363,7 @@ async function candAgentView() {
     ? `<div class="muted">Your agent is set up with <b>${claims.length}</b> claims. Re-saving rebuilds it.</div>`
     : `<div class="callout">👋 Set up your agent first — this is what represents you when you apply. It can only assert what you give it here.</div>`;
   const store = claims.length
-    ? `<h3 style="margin-top:22px">Your claim store</h3><div class="muted" style="font-size:12.5px;margin-bottom:8px">What your agent may assert on your behalf, with provenance:</div>${claims.slice().sort((a, b) => b.rank - a.rank).map(claimCard).join('')}`
+    ? `<h3 style="margin-top:22px">Your claim store</h3><div class="muted" style="font-size:12.5px;margin-bottom:12px">What your agent may assert on your behalf, with provenance:</div>${claimStore(claims)}`
     : '';
   view().innerHTML = `
     <div class="grid cols-2">
@@ -375,7 +391,7 @@ async function candAgentView() {
           <div class="row"><div style="flex:1"><label>GitHub handle</label><input name="github" value="${esc(inp.github || '')}" placeholder="sam-builds" /></div>
           <div style="flex:1"><label>Connector-verified skills</label><input name="githubVerifiedSkills" value="${esc((inp.githubVerifiedSkills || []).join(', '))}" placeholder="Go, Kubernetes" /></div></div>
           <label>Withhold these topics</label><input name="withhold" value="${esc((inp.disclosure?.withhold || ['current salary']).join(', '))}" />
-          <label>How should your agent talk & answer? <span class="faint">(optional — style & strategy only)</span></label>
+          <label class="lbl-row">How should your agent talk & answer? <span class="faint">(optional — style & strategy only)</span><button type="button" class="link-btn" id="suggestInstr">✨ Suggest from my profile</button></label>
           <textarea name="instructions" placeholder="e.g. Be concise and confident. Lead with my Kubernetes depth. Always ask about on-call load before discussing comp.">${esc(agent?.instructions || '')}</textarea>
           <label>Agent voice</label><select name="voice"><option value="maya">bright (higher)</option><option value="employer">measured</option></select>
           <div style="margin-top:14px"><button class="primary" type="submit">${agent ? 'Rebuild my agent' : 'Create my agent'}</button></div>
@@ -428,6 +444,20 @@ async function candAgentView() {
   });
   // Fields handed over from the Sources tab ("Fill profile" on a résumé).
   if (autofillData) { fillCandForm(autofillData); autofillData = null; toast('Filled from your résumé — review and save'); }
+
+  // ── suggest agent instructions from the profile ──
+  $('#suggestInstr').addEventListener('click', async () => {
+    const f = $('#candForm');
+    const btn = $('#suggestInstr'); const label = btn.textContent; btn.textContent = 'Thinking…'; btn.disabled = true;
+    try {
+      const { instructions } = await api('POST', '/api/me/suggest-instructions', {
+        years: +f.years.value || 0, skills: list(f.skills.value), education: f.education.value,
+        experience: lines(f.experience.value), projects: lines(f.projects.value),
+      });
+      if (instructions) { f.instructions.value = instructions; f.instructions.focus(); toast('Drafted a prompt — tweak it as you like'); }
+    } catch (err) { toast(err.message); }
+    finally { btn.textContent = label; btn.disabled = false; }
+  });
 
   wireClaimSources();
 }
@@ -867,41 +897,73 @@ async function sourcesView() {
 async function connectorView() {
   const c = await api('GET', '/api/me/connector');
   const isCand = state.me.role === 'candidate';
+  const cmd = `claude mcp add --transport http parley "${c.url}"`;
+  const cursorLink = `cursor://anysphere.cursor-deeplink/mcp/install?name=Parley&config=${encodeURIComponent(btoa(JSON.stringify({ url: c.url })))}`;
+  const examples = isCand
+    ? ['Show me the open jobs', 'Apply to the senior backend role', 'Update my résumé from this text…', 'Any new messages from interviewers?', 'Read the log for my last application']
+    : ['Post a senior Go role, hybrid in NYC, 180–230k', 'Who applied to my staff posting?', 'Summarize the last applicant’s report', 'Message the candidate and send a call link'];
+
   view().innerHTML = `
-    <div class="card" style="max-width:720px">
-      <h3>🔌 Parley connector <span class="pill" style="vertical-align:middle">MCP</span></h3>
-      <div class="muted" style="font-size:13.5px;line-height:1.6;margin-bottom:18px">
-        Add Parley to any MCP-compatible assistant (Claude, etc.) as a remote connector, then just talk to it:
-        ${isCand
-          ? '“what jobs are open?”, “apply to the staff backend role”, “update my résumé with this PDF”, “any messages from interviewers?”.'
-          : '“post a senior Go role, hybrid in NYC, 180–230k”, “who applied?”, “message the candidate and set up a call”.'}
-        It calls these tools for you and asks for anything it’s missing.
-      </div>
-      <label>Connector URL <span class="faint">(Streamable HTTP)</span></label>
-      <div class="copy-row"><input id="connUrl" readonly value="${esc(c.url)}" /><button class="ghost small" id="copyUrl">Copy</button></div>
-      <div class="muted" style="font-size:12px;margin-top:8px">The token in the URL authenticates as <b>${esc(state.me.displayName)}</b> · ${esc(c.role)}. Treat it like a password.</div>
-      <h4 style="margin-top:24px;font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">Tools exposed to your assistant</h4>
-      <div class="wrap" id="connTools" style="margin-top:10px"><span class="muted">Loading…</span></div>
-      <div class="row" style="margin-top:24px;gap:10px">
-        <button class="ghost small" id="regenTok">Regenerate token</button>
-        <span class="faint" style="font-size:12px">Invalidates the current URL.</span>
-      </div>
+    <div class="card connector" style="max-width:780px">
+      <div class="row" style="gap:10px"><h3 style="margin:0">🔌 Use Parley from your AI assistant</h3><span class="pill">MCP</span></div>
+      <p class="muted" style="font-size:14px;line-height:1.6;margin:12px 0 24px">
+        Connect Parley once, then just chat with your assistant to do everything —
+        ${isCand ? 'browse &amp; apply to jobs, update your résumé, and read your conversations.' : 'post jobs, review applicants, and message candidates or set up calls.'}
+        It runs the tools for you and asks for anything it needs.
+      </p>
+
+      <ol class="conn-steps">
+        <li>
+          <div class="cs-head"><span class="cs-num">1</span> Copy your private connector link</div>
+          <div class="copy-row"><input id="connUrl" readonly value="${esc(c.url)}" /><button class="primary small" id="copyUrl">Copy</button></div>
+          <div class="faint" style="font-size:12px;margin-top:7px">Signs in as <b>${esc(state.me.displayName)}</b> · ${esc(c.role)} — keep it private, like a password.</div>
+        </li>
+        <li>
+          <div class="cs-head"><span class="cs-num">2</span> Add it to your assistant</div>
+          <div class="conn-clients">
+            <div class="conn-client">
+              <div class="cc-name">Claude Code <span class="faint">· one paste in your terminal</span></div>
+              <div class="copy-row"><input id="connCmd" readonly value="${esc(cmd)}" /><button class="ghost small" id="copyCmd">Copy</button></div>
+            </div>
+            <div class="conn-client">
+              <div class="cc-name">Cursor <span class="faint">· one click</span></div>
+              <a class="btn-primary small" href="${esc(cursorLink)}">＋ Add to Cursor</a>
+            </div>
+            <div class="conn-client">
+              <div class="cc-name">Claude Desktop / claude.ai</div>
+              <div class="faint" style="font-size:13px;line-height:1.7">Settings → <b>Connectors</b> → <b>Add custom connector</b> → paste the link from step 1.</div>
+            </div>
+          </div>
+        </li>
+        <li>
+          <div class="cs-head"><span class="cs-num">3</span> Just talk to it</div>
+          <div class="conn-examples">${examples.map((e) => `<span class="conn-ex">“${esc(e)}”</span>`).join('')}</div>
+        </li>
+      </ol>
+
+      <details class="conn-tools-d"><summary>Tools your assistant can use</summary><div class="wrap" id="connTools" style="margin-top:12px"><span class="muted">Loading…</span></div></details>
+      <div class="row" style="margin-top:18px;gap:10px"><button class="ghost small" id="regenTok">Regenerate token</button><span class="faint" style="font-size:12px">Invalidates the current link.</span></div>
     </div>`;
 
-  const loadTools = async (url) => {
+  (async () => {
     try {
-      const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) }).then((x) => x.json());
+      const r = await fetch(c.url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) }).then((x) => x.json());
       const tools = r?.result?.tools || [];
       $('#connTools').innerHTML = tools.map((t) => `<span class="pill" title="${esc(t.description)}">${esc(t.name)}</span>`).join('') || '<span class="muted">none</span>';
-    } catch { $('#connTools').innerHTML = '<span class="muted">could not load tools</span>'; }
-  };
-  loadTools(c.url);
+    } catch { $('#connTools').innerHTML = '<span class="muted">could not load</span>'; }
+  })();
 
-  $('#copyUrl').addEventListener('click', () => { navigator.clipboard?.writeText($('#connUrl').value); toast('Connector URL copied'); });
+  const copyBtn = (btn, src) => $(btn).addEventListener('click', () => {
+    navigator.clipboard?.writeText($(src).value);
+    const el = $(btn); const t = el.textContent; el.textContent = 'Copied ✓';
+    setTimeout(() => { el.textContent = t; }, 1400);
+  });
+  copyBtn('#copyUrl', '#connUrl');
+  copyBtn('#copyCmd', '#connCmd');
   $('#regenTok').addEventListener('click', async () => {
-    if (!confirm('Regenerate the token? The old connector URL will stop working.')) return;
-    const n = await api('POST', '/api/me/connector/regenerate');
-    $('#connUrl').value = n.url; toast('New token generated'); loadTools(n.url);
+    if (!confirm('Regenerate the token? The current link will stop working everywhere.')) return;
+    await api('POST', '/api/me/connector/regenerate');
+    toast('New token generated'); connectorView();
   });
 }
 
@@ -997,6 +1059,10 @@ async function detailView(viewerRole) {
     </div>`).join('');
 
   const otherName = viewerRole === 'candidate' ? (c.employer?.principalName || 'the interviewer') : (c.candidate?.principalName || 'the candidate');
+  // The Claims tab shows only the OTHER side's claims (candidate sees the interviewer's, and vice-versa).
+  const counterRole = viewerRole === 'candidate' ? 'employer' : 'candidate';
+  const otherClaims = c.claims.filter((cl) => cl.subjectRole === counterRole);
+  const convUnread = (notif.items.find((i) => i.conversationId === state.convId)?.unread) || 0;
   const report = c.reports[viewerRole];
   const connectCta = `
     <div class="connect-cta">
@@ -1015,7 +1081,7 @@ async function detailView(viewerRole) {
       ${connectCta}
     </div>` : `<div class="muted">No report.</div>${connectCta}`;
 
-  const claimsHtml = c.claims.length ? c.claims.slice().sort((a, b) => b.rank - a.rank).map(claimCard).join('') : '<div class="muted">No claims surfaced.</div>';
+  const claimsHtml = otherClaims.length ? otherClaims.slice().sort((a, b) => b.rank - a.rank).map(claimCard).join('') : '<div class="muted">No claims surfaced about the other side.</div>';
   const agendaList = (items, kind) => items.length ? items.map((a) => `<div class="agenda-item">${esc(a)}</div>`).join('') : `<div class="agenda-item done">✓ all ${kind} questions answered</div>`;
   const followups = c.followups.length ? c.followups.map((f) => `<div class="agenda-item ${f.status === 'resolved' ? 'done' : ''}">🔎 ${esc(f.answeredBy)} fetched “${esc(f.topic)}” → ${esc(f.resolution || 'pending')}</div>`).join('') : '<div class="muted">No followups were needed.</div>';
 
@@ -1031,9 +1097,9 @@ async function detailView(viewerRole) {
         <div class="transcript">${transcript}</div>
       </div>
       <div>
-        <div class="side-tabs"><button class="active" data-side="report">Report</button><button data-side="claims">Claims (${c.claims.length})</button><button data-side="agendas">Agendas</button><button data-side="messages">Messages</button></div>
+        <div class="side-tabs"><button class="active" data-side="report">Report</button><button data-side="claims">Claims (${otherClaims.length})</button><button data-side="agendas">Agendas</button><button data-side="messages">Messages${convUnread ? ` <span class="tab-badge">${convUnread}</span>` : ''}</button></div>
         <div id="sideReport" class="side-pane">${reportHtml}</div>
-        <div id="sideClaims" class="side-pane" style="display:none"><div class="muted" style="font-size:12.5px;margin-bottom:8px">Every claim surfaced. Click a <span class="src-link">↳ source</span> to jump to the moment it was said, or a <span class="src-link">📄 document</span> to open the file.</div>${claimsHtml}</div>
+        <div id="sideClaims" class="side-pane" style="display:none"><div class="muted" style="font-size:12.5px;margin-bottom:8px">What your agent learned about <b>${esc(otherName)}</b>, with provenance. Click a <span class="src-link">↳ source</span> to jump to the moment it was said, or a <span class="src-link">📄 document</span> to open the file.</div>${claimsHtml}</div>
         <div id="sideAgendas" class="side-pane" style="display:none"><div class="card">
           <div class="agenda-col"><h4>Candidate still wanted to know</h4>${agendaList(c.openAgenda.candidate, 'candidate')}</div>
           <div class="agenda-col" style="margin-top:14px"><h4>Interviewer still wanted to know</h4>${agendaList(c.openAgenda.employer, 'employer')}</div>
@@ -1055,7 +1121,7 @@ async function detailView(viewerRole) {
     $('#sideClaims').style.display = w === 'claims' ? '' : 'none';
     $('#sideAgendas').style.display = w === 'agendas' ? '' : 'none';
     $('#sideMessages').style.display = w === 'messages' ? '' : 'none';
-    if (w === 'messages') openMessages(state.convId, otherName); else stopDMPoll();
+    if (w === 'messages') { view().querySelector('[data-side="messages"] .tab-badge')?.remove(); openMessages(state.convId, otherName); } else stopDMPoll();
   };
 
   $('#backBtn').addEventListener('click', () => { stopSpeech(); stopDMPoll(); state.convId = null; route(); });

@@ -213,6 +213,31 @@ app.post('/api/me/parse-resume', async (req, res) => {
   } catch (e) { res.status(400).json({ error: e instanceof Error ? e.message : String(e) }); }
 });
 
+// Draft a "how should my agent talk & answer" instruction from the candidate's
+// own details (résumé / skills / experience), for the human to tweak.
+app.post('/api/me/suggest-instructions', async (req, res) => {
+  const u = roled(req, res, 'candidate'); if (!u) return;
+  const b = req.body ?? {};
+  const cur = u.candidateInputs ?? {};
+  const years = b.years ?? cur.years;
+  const skills: string[] = b.skills ?? cur.skills ?? [];
+  const education = b.education ?? cur.education;
+  const experience: string[] = b.experience ?? cur.experience ?? [];
+  const projects: string[] = b.projects ?? cur.projects ?? [];
+  const summary = [
+    years != null && years !== '' ? `Years of experience: ${years}` : '',
+    skills.length ? `Skills: ${skills.join(', ')}` : '',
+    education ? `Education: ${education}` : '',
+    experience.length ? `Experience:\n- ${experience.join('\n- ')}` : '',
+    projects.length ? `Projects:\n- ${projects.join('\n- ')}` : '',
+  ].filter(Boolean).join('\n');
+  if (!summary.trim()) return res.status(400).json({ error: 'add some profile details first' });
+  try {
+    const instructions = await getProvider().suggestInstructions(summary);
+    res.json({ instructions });
+  } catch (e) { res.status(400).json({ error: e instanceof Error ? e.message : String(e) }); }
+});
+
 app.get('/api/jobs', (req, res) => {
   const u = auth(req, res); if (!u) return;
   res.json(store.listJobs().map(viewJob));
