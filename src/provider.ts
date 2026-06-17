@@ -77,11 +77,22 @@ export interface FollowupContext {
   facts: Fact[];
 }
 
+/** Structured candidate fields parsed out of a résumé to pre-fill the profile. */
+export interface ResumeFields {
+  years?: number;
+  skills?: string[];
+  education?: string;
+  experience?: string[];
+  projects?: string[];
+  github?: string;
+}
+
 export interface Provider {
   readonly name: string;
   speak(ctx: SpeakContext): Promise<SpeakResult>;
   inferRead(ctx: ReadContext): Promise<string>;
   resolveFollowup(ctx: FollowupContext): Promise<string>;
+  extractResume(text: string): Promise<ResumeFields>;
 }
 
 // ── helpers shared by both providers ─────────────────────────────────────────
@@ -155,6 +166,33 @@ function bestFact(question: string, facts: Fact[]): Fact | undefined {
     if (score > bestScore) { best = f; bestScore = score; }
   }
   return bestScore > 0 ? best : undefined;
+}
+
+function ghHandle(s?: string): string | undefined {
+  if (!s) return undefined;
+  const h = String(s).replace(/.*github\.com\//i, '').replace(/^@/, '').replace(/\/.*$/, '').trim();
+  return h || undefined;
+}
+
+/** A no-LLM résumé parse (also the fallback if the model hiccups). */
+function heuristicExtract(text: string): ResumeFields {
+  const out: ResumeFields = {};
+  const ym = text.match(/(\d{1,2})\+?\s*years?/i);
+  if (ym) out.years = Number(ym[1]);
+  else {
+    const yrs = [...text.matchAll(/\b(?:19|20)\d{2}\b/g)].map((m) => Number(m[0]));
+    if (yrs.length >= 2) { const span = Math.max(...yrs) - Math.min(...yrs); if (span > 0 && span < 50) out.years = span; }
+  }
+  out.github = ghHandle(text.match(/github\.com\/[A-Za-z0-9-]+/i)?.[0]);
+  const sk = text.match(/skills?\s*[:\-]\s*(.+)/i);
+  if (sk) out.skills = sk[1]!.split(/[,;|•]/).map((s) => s.trim()).filter(Boolean).slice(0, 12);
+  const ed = text.match(/((?:B\.?S\.?|M\.?S\.?|Ph\.?D\.?|Bachelor|Master|B\.?Tech|M\.?Tech)[^\n]{0,80})/i);
+  if (ed) out.education = ed[1]!.trim();
+  const exp = text.split('\n').map((l) => l.trim())
+    .filter((l) => l.length >= 25 && l.length <= 200 && /\d|\b(led|built|ran|managed|developed|engineer|designed|shipped|owned|scaled)\b/i.test(l) && !/^[A-Z][A-Z\s]{5,}$/.test(l))
+    .slice(0, 5);
+  if (exp.length) out.experience = exp;
+  return out;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -234,6 +272,10 @@ class MockProvider implements Provider {
     if (f) return f.statement;
     return `no firm information on ${ctx.topic} yet; ${ctx.side === 'candidate' ? 'the candidate' : 'the company'} will confirm directly`;
   }
+
+  async extractResume(text: string): Promise<ResumeFields> {
+    return heuristicExtract(text);
+  }
 }
 
 // Small persona/word helpers. Persona affects STYLE ONLY — never facts.
@@ -282,7 +324,7 @@ class LLMProvider implements Provider {
   // 5xx, network blips) — the free tier hiccups occasionally and an un-retried
   // failure used to fall through to a dead "let me come back to you" turn,
   // which could stall the whole parley. Client errors (4xx) are not retried.
-  private async chat(messages: { role: string; content: string }[], maxTokens: number, json = false): Promise<string> {
+  private async chat(messages: { role: string; content: string }[], maxTokens: number, json = false, temperature = 0.6): Promise<string> {
     let lastErr: unknown;
     for (let attempt = 1; attempt <= 4; attempt++) {
       try {
@@ -292,7 +334,7 @@ class LLMProvider implements Provider {
           body: JSON.stringify({
             model: this.cfg.model,
             messages,
-            temperature: 0.6,
+            temperature,
             max_tokens: maxTokens,
             ...(json ? { response_format: { type: 'json_object' } } : {}),
           }),
@@ -400,6 +442,43 @@ class LLMProvider implements Provider {
     // from the side's own facts if possible, else mark it for direct confirmation.
     const f = bestFact(ctx.topic, ctx.facts);
     return f ? f.statement : `to be confirmed directly with ${ctx.side === 'candidate' ? 'the candidate' : 'the company'}`;
+  }
+
+  async extractResume(text: string): Promise<ResumeFields> {
+    const system = [
+      'You parse a résumé into structured fields to pre-fill a candidate profile.',
+      'Reply with ONLY a JSON object of this exact shape — no prose, no markdown:',
+      '{',
+      '  "years": <total years of professional experience as a number; infer from the work history if not stated>,',
+      '  "skills": ["short skill", …],            // concrete skills/technologies, <= 12',
+      '  "education": "one line, e.g. MS Computer Science, Georgia Tech",',
+      '  "experience": ["one short line per role/achievement", …],  // <= 8',
+      '  "projects": ["one short line per notable project", …],     // <= 8, omit if none',
+      '  "github": "handle only, or omit"',
+      '}',
+      'Only use information present in the résumé. Omit a field if unknown.',
+    ].join('\n');
+    // The heuristic is the baseline; the model's fields overlay it. So even if the
+    // model is unavailable (daily limit) or returns partial JSON, common fields
+    // (skills line, degree, github, "N years") still come through.
+    const base = heuristicExtract(text);
+    try {
+      const raw = await this.chat([{ role: 'system', content: system }, { role: 'user', content: `RÉSUMÉ:\n${text.slice(0, 8000)}` }], 800, true, 0.1);
+      const r = JSON.parse(stripFences(raw)) as Record<string, unknown>;
+      const arr = (v: unknown, n: number) => { const a = Array.isArray(v) ? v.map(String).map((s) => s.trim()).filter(Boolean).slice(0, n) : undefined; return a && a.length ? a : undefined; };
+      const yrs = typeof r.years === 'number' ? r.years : (typeof r.years === 'string' && r.years.trim() ? Number.parseInt(r.years, 10) || undefined : undefined);
+      return {
+        years: yrs ?? base.years,
+        skills: arr(r.skills, 12) ?? base.skills,
+        education: (typeof r.education === 'string' && /\s/.test(r.education.trim())) ? r.education.trim() : base.education,
+        experience: arr(r.experience, 8),
+        projects: arr(r.projects, 8),
+        github: ghHandle(typeof r.github === 'string' ? r.github : undefined) ?? base.github,
+      };
+    } catch (e) {
+      console.warn(`[parley] extractResume fell back: ${e instanceof Error ? e.message : e}`);
+      return base;
+    }
   }
 }
 

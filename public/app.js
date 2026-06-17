@@ -113,6 +113,7 @@ function openConversationMessages(cid) {
 }
 
 const state = { me: null, config: {}, tab: null, convId: null, openMessages: false };
+let autofillData = null; // résumé fields handed from the Sources tab to the agent form
 
 // ── speech (listenable logs) ─────────────────────────────────────────────────
 let VOICES = [];
@@ -152,6 +153,12 @@ function claimCard(c) {
   </div>`;
 }
 
+// Brand mark — a scales-of-justice (Parley = balance/negotiation). Gradient for
+// the header, plain currentColor for the coloured auth hero.
+const LOGO_PATHS = `<path d="m16 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z"/><path d="m2 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z"/><path d="M7 21h10"/><path d="M12 3v18"/><path d="M3 7h2c2 0 5-1 7-2 2 1 5 2 7 2h2"/>`;
+const LOGO_MARK = `<svg class="brand-mark" viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="url(#pgrad)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><defs><linearGradient id="pgrad" x1="2" y1="3" x2="22" y2="21" gradientUnits="userSpaceOnUse"><stop stop-color="#0a84ff"/><stop offset=".55" stop-color="#5856d6"/><stop offset="1" stop-color="#30d158"/></linearGradient></defs>${LOGO_PATHS}</svg>`;
+const HERO_MARK = `<svg class="brand-mark" viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${LOGO_PATHS}</svg>`;
+
 function providerBadge() {
   const c = state.config || {};
   if (c.hasKey) {
@@ -168,7 +175,7 @@ function header() {
   const right = me
     ? `${providerBadge()}<span class="badge role-${me.role}">${esc(me.displayName)} · ${me.role === 'candidate' ? 'Candidate' : 'Interviewer'}</span><button class="ghost" id="logoutBtn">Log out</button>`
     : providerBadge();
-  return `<header class="top"><div class="brand">⚖ <span class="wordmark">Parley</span> <small>${tag}</small></div><div class="spacer"></div>${me ? bellBtn() : ''}${themeBtn()}${right}</header>`;
+  return `<header class="top"><div class="brand">${LOGO_MARK}<span class="wordmark">Parley</span> <small>${tag}</small></div><div class="spacer"></div>${me ? bellBtn() : ''}${themeBtn()}${right}</header>`;
 }
 
 function frame(tabs, bodyHtml) {
@@ -204,7 +211,7 @@ function renderAuth() {
   app().innerHTML = `
     <div class="auth-shell" data-mode="${isSignup ? 'signup' : 'login'}">
       <aside class="auth-hero">
-        <div class="hero-brand">⚖ <span>Parley</span></div>
+        <div class="hero-brand">${HERO_MARK}<span>Parley</span></div>
         <div class="hero-mid">
           <h1 class="hero-title">Two agents parley.<br/>You decide.</h1>
           <p class="hero-sub">Each side sets up an AI agent. They trade verifiable information and report back — the human always makes the final call.</p>
@@ -334,7 +341,8 @@ async function renderCandidate() {
 }
 
 async function candAgentView() {
-  const { agent, claims } = await api('GET', '/api/me/agent');
+  const { agent, claims, inputs } = await api('GET', '/api/me/agent');
+  const inp = inputs || {};
   const intro = agent
     ? `<div class="muted">Your agent is set up with <b>${claims.length}</b> claims. Re-saving rebuilds it.</div>`
     : `<div class="callout">👋 Set up your agent first — this is what represents you when you apply. It can only assert what you give it here.</div>`;
@@ -346,15 +354,27 @@ async function candAgentView() {
       <div class="card">
         <h3>🧑‍💻 Your agent</h3>
         ${intro}
+        <div class="autofill">
+          <button type="button" class="autofill-cta" id="afToggle"><span class="af-spark">✨</span> Autofill from résumé</button>
+          <div id="afPanel" class="autofill-panel" style="display:none">
+            <textarea id="afText" rows="5" placeholder="Paste your résumé text here — we’ll read it and fill the fields below…"></textarea>
+            <div class="row" style="gap:10px;margin-top:10px">
+              <label class="file-pick" style="margin:0">Upload .txt/.md<input type="file" id="afFile" accept=".txt,.md,.markdown,.csv" hidden /></label>
+              <div class="spacer"></div>
+              <button type="button" class="primary small" id="afRun">Extract &amp; fill ▸</button>
+            </div>
+            <div class="faint" style="font-size:11.5px;margin-top:8px">PDF or Word? Open it, copy the text, and paste above. Fields fill in for you to review before saving.</div>
+          </div>
+        </div>
         <form id="candForm">
-          <label>Years of experience</label><input name="years" type="number" value="${agent ? '' : 7}" placeholder="7" />
-          <label>Skills (comma-separated)</label><input name="skills" placeholder="Go, Kubernetes, distributed systems" />
-          <label>Education</label><input name="education" placeholder="MS Computer Science, Georgia Tech" />
-          <label>Experience (one per line)</label><textarea name="experience" placeholder="Led a 6-person platform team at Skiff"></textarea>
-          <label>Projects (one per line)</label><textarea name="projects" placeholder="raftish — a teaching Raft implementation"></textarea>
-          <div class="row"><div style="flex:1"><label>GitHub handle</label><input name="github" placeholder="sam-builds" /></div>
-          <div style="flex:1"><label>Connector-verified skills</label><input name="githubVerifiedSkills" placeholder="Go, Kubernetes" /></div></div>
-          <label>Withhold these topics</label><input name="withhold" value="current salary" />
+          <label>Years of experience</label><input name="years" type="number" value="${agent ? esc(inp.years ?? '') : 7}" placeholder="7" />
+          <label>Skills (comma-separated)</label><input name="skills" value="${esc((inp.skills || []).join(', '))}" placeholder="Go, Kubernetes, distributed systems" />
+          <label>Education</label><input name="education" value="${esc(inp.education || '')}" placeholder="MS Computer Science, Georgia Tech" />
+          <label>Experience (one per line)</label><textarea name="experience" placeholder="Led a 6-person platform team at Skiff">${esc((inp.experience || []).join('\n'))}</textarea>
+          <label>Projects (one per line)</label><textarea name="projects" placeholder="raftish — a teaching Raft implementation">${esc((inp.projects || []).join('\n'))}</textarea>
+          <div class="row"><div style="flex:1"><label>GitHub handle</label><input name="github" value="${esc(inp.github || '')}" placeholder="sam-builds" /></div>
+          <div style="flex:1"><label>Connector-verified skills</label><input name="githubVerifiedSkills" value="${esc((inp.githubVerifiedSkills || []).join(', '))}" placeholder="Go, Kubernetes" /></div></div>
+          <label>Withhold these topics</label><input name="withhold" value="${esc((inp.disclosure?.withhold || ['current salary']).join(', '))}" />
           <label>How should your agent talk & answer? <span class="faint">(optional — style & strategy only)</span></label>
           <textarea name="instructions" placeholder="e.g. Be concise and confident. Lead with my Kubernetes depth. Always ask about on-call load before discussing comp.">${esc(agent?.instructions || '')}</textarea>
           <label>Agent voice</label><select name="voice"><option value="maya">bright (higher)</option><option value="employer">measured</option></select>
@@ -380,6 +400,35 @@ async function candAgentView() {
       toast('Your agent is ready'); candAgentView();
     } catch (err) { toast(err.message); }
   });
+
+  // ── autofill from résumé ──
+  const fillCandForm = (fields) => {
+    const f = $('#candForm');
+    if (!f || !fields) return;
+    if (fields.years != null && fields.years !== '') f.years.value = fields.years;
+    if (fields.skills?.length) f.skills.value = fields.skills.join(', ');
+    if (fields.education) f.education.value = fields.education;
+    if (fields.experience?.length) f.experience.value = fields.experience.join('\n');
+    if (fields.projects?.length) f.projects.value = fields.projects.join('\n');
+    if (fields.github) f.github.value = fields.github;
+  };
+  $('#afToggle').addEventListener('click', () => { const p = $('#afPanel'); p.style.display = p.style.display === 'none' ? '' : 'none'; if (p.style.display === '') $('#afText').focus(); });
+  $('#afFile').addEventListener('change', async (e) => { const file = e.target.files[0]; if (file) $('#afText').value = (await file.text()).slice(0, 20000); });
+  $('#afRun').addEventListener('click', async () => {
+    const text = $('#afText').value.trim();
+    if (!text) return toast('Paste your résumé text first');
+    const btn = $('#afRun'); btn.disabled = true; btn.textContent = 'Reading résumé…';
+    try {
+      const { fields } = await api('POST', '/api/me/parse-resume', { text });
+      fillCandForm(fields);
+      $('#afPanel').style.display = 'none';
+      toast('Filled from your résumé — review and save');
+    } catch (err) { toast(err.message); }
+    finally { btn.disabled = false; btn.innerHTML = 'Extract &amp; fill ▸'; }
+  });
+  // Fields handed over from the Sources tab ("Fill profile" on a résumé).
+  if (autofillData) { fillCandForm(autofillData); autofillData = null; toast('Filled from your résumé — review and save'); }
+
   wireClaimSources();
 }
 
@@ -733,6 +782,7 @@ function srcCard(s) {
       <div class="src-title">${esc(s.title)}</div>
       <div class="faint" style="font-size:12px">${esc(s.kind)} · ${meta}</div>
     </div>
+    ${state.me.role === 'candidate' && s.kind === 'resume' ? `<button class="ghost small" data-fill-src="${s.id}">✨ Fill profile</button>` : ''}
     <a class="ghost small" href="/api/sources/${s.id}/raw" target="_blank" rel="noopener">Open</a>
     <button class="ghost small" data-del-src="${s.id}">Delete</button>
   </div>`;
@@ -798,6 +848,16 @@ async function sourcesView() {
     if (!confirm('Delete this document? Its claims will be removed too.')) return;
     try { await api('DELETE', '/api/me/sources/' + b.getAttribute('data-del-src')); sourcesView(); }
     catch (err) { toast(err.message); }
+  }));
+
+  view().querySelectorAll('[data-fill-src]').forEach((b) => b.addEventListener('click', async () => {
+    b.disabled = true; const orig = b.textContent; b.textContent = 'Reading…';
+    try {
+      const text = await fetch(`/api/sources/${b.getAttribute('data-fill-src')}/raw`, { credentials: 'same-origin' }).then((r) => r.text());
+      const { fields } = await api('POST', '/api/me/parse-resume', { text });
+      autofillData = fields;
+      state.tab = 'agent'; route(); // candAgentView applies autofillData
+    } catch (err) { toast(err.message); b.disabled = false; b.textContent = orig; }
   }));
 }
 

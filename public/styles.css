@@ -87,6 +87,16 @@ input:focus, select:focus, textarea:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px rgba(0, 102, 204, 0.2);
 }
+/* Keep browser-autofilled fields on-theme instead of Chrome's white/yellow box. */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus {
+  -webkit-text-fill-color: var(--text);
+  -webkit-box-shadow: 0 0 0 1000px var(--panel-solid) inset;
+  caret-color: var(--text);
+  border-color: var(--edge);
+  transition: background-color 9999s ease 0s;
+}
 textarea { resize: vertical; min-height: 80px; }
 label { display: block; font-size: 13px; font-weight: 500; color: var(--muted); margin: 16px 0 6px; }
 
@@ -269,7 +279,7 @@ button.small { padding: 6px 12px; font-size: 13px; }
 .hero-feature span { display: block; font-size: 13px; line-height: 1.5; color: rgba(255,255,255,0.82); }
 
 /* Right: the form */
-.auth-panel { position: relative; display: flex; align-items: center; justify-content: center; padding: 48px 40px; background: var(--bg); }
+.auth-panel { position: relative; display: flex; align-items: center; justify-content: center; padding: 48px 40px; background: var(--bg); max-width: none; margin: 0; }
 .auth-controls { position: absolute; top: 22px; right: 26px; display: flex; align-items: center; gap: 10px; z-index: 5; }
 .auth-box { width: 100%; max-width: 396px; animation: fade-in 0.5s ease-out; }
 .auth-box h2 { font-size: 28px; margin: 0 0 8px; }
@@ -550,3 +560,41 @@ input[type="file"]::file-selector-button { font: inherit; font-weight: 500; marg
 .copy-row { display: flex; gap: 8px; align-items: stretch; }
 .copy-row input { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
 .copy-row button { flex: none; white-space: nowrap; }
+
+/* ═══ Global refinements (minute details) ═══ */
+h1, h2, h3, .hero-title { text-wrap: balance; }
+::selection { background: rgba(0, 102, 204, 0.16); }
+[data-theme="dark"] ::selection { background: rgba(10, 132, 255, 0.34); }
+
+* { scrollbar-width: thin; scrollbar-color: rgba(0,0,0,0.2) transparent; }
+::-webkit-scrollbar { width: 11px; height: 11px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.18); border-radius: 99px; border: 3px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background: rgba(0,0,0,0.30); background-clip: padding-box; }
+[data-theme="dark"] * { scrollbar-color: rgba(255,255,255,0.18) transparent; }
+[data-theme="dark"] ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.16); background-clip: padding-box; }
+[data-theme="dark"] ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.28); background-clip: padding-box; }
+
+button:focus-visible, a:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button:focus:not(:focus-visible) { outline: none; }
+
+/* Brand mark */
+.brand-mark { flex: none; vertical-align: middle; display: inline-block; }
+.brand { display: inline-flex; align-items: center; gap: 9px; }
+.hero-brand { gap: 11px; }
+
+/* ═══ Autofill from résumé ═══ */
+.autofill { margin: 14px 0 6px; }
+.autofill-cta {
+  display: inline-flex; align-items: center; gap: 8px; font-weight: 600; font-size: 13.5px;
+  color: var(--accent); background: rgba(0,102,204,0.06); border: 1px solid rgba(0,102,204,0.25);
+  border-radius: 99px; padding: 8px 16px; box-shadow: none;
+}
+.autofill-cta:hover { background: rgba(0,102,204,0.12); border-color: var(--accent); transform: none; box-shadow: none; }
+.af-spark { font-size: 14px; line-height: 1; }
+.autofill-panel { margin-top: 12px; padding: 14px; border: 1px solid var(--edge); border-radius: var(--radius-md); background: var(--panel-2); animation: fade-in .2s ease-out; }
+.autofill-panel textarea { background: var(--panel-solid); }
+.file-pick { display: inline-flex; align-items: center; cursor: pointer; font-size: 13px; font-weight: 500; color: var(--text); background: var(--panel-solid); border: 1px solid var(--edge); border-radius: var(--radius-sm); padding: 7px 14px; box-shadow: var(--shadow-sm); transition: all .2s; }
+.file-pick:hover { border-color: var(--accent); }
+[data-theme="dark"] .autofill-cta { background: rgba(10,132,255,0.10); border-color: rgba(10,132,255,0.30); }
+[data-theme="dark"] .autofill-cta:hover { background: rgba(10,132,255,0.18); }

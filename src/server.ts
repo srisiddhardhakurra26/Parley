@@ -191,7 +191,7 @@ app.post('/api/auth/google-demo', (req, res) => {
 app.get('/api/me/agent', (req, res) => {
   const u = roled(req, res, 'candidate'); if (!u) return;
   const agent = u.agentId ? store.getAgent(u.agentId) : undefined;
-  res.json({ agent: agent ?? null, claims: agent ? store.claimsBySubject(agent.id).map(viewClaim) : [] });
+  res.json({ agent: agent ?? null, inputs: u.candidateInputs ?? null, claims: agent ? store.claimsBySubject(agent.id).map(viewClaim) : [] });
 });
 
 app.put('/api/me/agent', (req, res) => {
@@ -199,6 +199,17 @@ app.put('/api/me/agent', (req, res) => {
   try {
     const agent = saveCandidateProfile(u.id, req.body);
     res.json({ agent, claims: store.claimsBySubject(agent.id).map(viewClaim) });
+  } catch (e) { res.status(400).json({ error: e instanceof Error ? e.message : String(e) }); }
+});
+
+// Parse a résumé into structured fields (LLM) so the profile form can autofill.
+app.post('/api/me/parse-resume', async (req, res) => {
+  const u = roled(req, res, 'candidate'); if (!u) return;
+  const text = String(req.body?.text ?? '').trim();
+  if (!text) return res.status(400).json({ error: 'no résumé text to parse' });
+  try {
+    const fields = await getProvider().extractResume(text);
+    res.json({ fields });
   } catch (e) { res.status(400).json({ error: e instanceof Error ? e.message : String(e) }); }
 });
 
