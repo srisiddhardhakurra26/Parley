@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { Agent, Claim, Conversation, DM, Job, Source, User } from './types.ts';
+import type { Agent, Claim, Conversation, DM, Job, ParleyRequest, Source, User } from './types.ts';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const DATA_DIR = join(ROOT, 'data');
@@ -22,9 +22,10 @@ interface DB {
   sources: Record<string, Source>;
   dms: Record<string, DM>;
   dmReads: Record<string, string>; // `${userId}::${conversationId}` → last-read ISO time
+  requests: Record<string, ParleyRequest>;
 }
 
-const empty: DB = { users: {}, agents: {}, jobs: {}, claims: {}, conversations: {}, sources: {}, dms: {}, dmReads: {} };
+const empty: DB = { users: {}, agents: {}, jobs: {}, claims: {}, conversations: {}, sources: {}, dms: {}, dmReads: {}, requests: {} };
 
 function load(): DB {
   if (!existsSync(DB_PATH)) return structuredClone(empty);
@@ -138,6 +139,17 @@ export const store = {
   // read state for unread-message notifications
   markRead(userId: string, convId: string, atISO: string): void { db.dmReads[`${userId}::${convId}`] = atISO; persist(); },
   lastRead(userId: string, convId: string): string | undefined { return db.dmReads[`${userId}::${convId}`]; },
+
+  // parley requests (consent before the agents talk)
+  putRequest(r: ParleyRequest): ParleyRequest { db.requests[r.id] = r; persist(); return r; },
+  getRequest(reqId: string): ParleyRequest | undefined { return db.requests[reqId]; },
+  listRequests(): ParleyRequest[] {
+    return Object.values(db.requests).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  },
+  /** An existing live request for this (job, candidate) pair, if any. */
+  findRequest(jobId: string, candidateAgentId: string): ParleyRequest | undefined {
+    return Object.values(db.requests).find((r) => r.jobId === jobId && r.candidateAgentId === candidateAgentId && r.status !== 'declined');
+  },
 
   // test/dev helpers
   reset(): void { db = structuredClone(empty); persist(); },

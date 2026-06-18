@@ -99,6 +99,10 @@ export interface Provider {
   extractResume(text: string): Promise<ResumeFields>;
   /** Draft a short "how should my agent talk" instruction from a profile summary. */
   suggestInstructions(summary: string): Promise<string>;
+  /** Answer a human's question about the other side, grounded only in the evidence. */
+  copilot(question: string, evidence: string, history?: { role: 'user' | 'assistant'; content: string }[]): Promise<string>;
+  /** Coach a candidate after a practice parley: how it went + what's missing. */
+  coach(roleSummary: string, transcript: string): Promise<string>;
 }
 
 // ── helpers shared by both providers ─────────────────────────────────────────
@@ -291,6 +295,18 @@ class MockProvider implements Provider {
 
   async suggestInstructions(summary: string): Promise<string> {
     return fallbackInstructions(summary);
+  }
+
+  async copilot(question: string, evidence: string): Promise<string> {
+    const qk = keywords(question);
+    const lines = evidence.split('\n').filter((l) => l.trim().startsWith('-') || /:/.test(l));
+    let best = ''; let bestScore = 0;
+    for (const l of lines) { const s = overlapScore(qk, keywords(l)); if (s > bestScore) { bestScore = s; best = l; } }
+    return bestScore > 0 ? `From the parley: ${best.replace(/^[-\s]+/, '').trim()}` : 'That didn’t come up in the parley — only what the agents surfaced is on record.';
+  }
+
+  async coach(roleSummary: string): Promise<string> {
+    return `Practice complete. The claims above are what your agent surfaced for ${roleSummary}. Review which requirements you covered and which you didn’t, and tighten your profile or instructions before applying for real.`;
   }
 }
 
@@ -532,6 +548,41 @@ class LLMProvider implements Provider {
     } catch (e) {
       console.warn(`[parley] suggestInstructions fell back: ${e instanceof Error ? e.message : e}`);
       return fallbackInstructions(summary);
+    }
+  }
+
+  async copilot(question: string, evidence: string, history: { role: 'user' | 'assistant'; content: string }[] = []): Promise<string> {
+    const system = [
+      'You are a hiring copilot helping a human assess the other side of a recruiting parley.',
+      'Answer ONLY from the EVIDENCE below (claims with provenance tiers, the transcript, and your agent’s read). If the answer is not in the evidence, say so plainly — never invent or assume.',
+      'Be concise and specific. When it matters, note provenance (e.g. "self-stated, unverified" vs "verified"). You are an aide, not a decision-maker — never tell them to hire or reject.',
+      '',
+      'EVIDENCE:',
+      evidence,
+    ].join('\n');
+    try {
+      const raw = await this.chat([{ role: 'system', content: system }, ...history.slice(-6), { role: 'user', content: question }], 420, false, 0.3);
+      return raw.trim() || 'I can’t answer that from what the parley surfaced.';
+    } catch (e) {
+      console.warn(`[parley] copilot fell back: ${e instanceof Error ? e.message : e}`);
+      return 'Copilot is unavailable right now — rely on the claims and transcript directly.';
+    }
+  }
+
+  async coach(roleSummary: string, transcript: string): Promise<string> {
+    const system = [
+      'You are a career coach reviewing a candidate’s PRACTICE parley with a mock interviewer for a role. Give the candidate tight, candid, actionable feedback.',
+      'Use exactly these three short sections, each 1-2 sentences, no preamble:',
+      'How it went: <honest read of how the candidate came across>',
+      'What’s missing to be a yes: <the most important gaps for THIS role>',
+      'Do this next: <2-3 concrete fixes — emphasise a strength, add a claim, tighten instructions, etc.>',
+    ].join('\n');
+    try {
+      const raw = await this.chat([{ role: 'system', content: system }, { role: 'user', content: `ROLE:\n${roleSummary}\n\nPRACTICE TRANSCRIPT:\n${transcript.slice(0, 6000)}` }], 360, false, 0.4);
+      return raw.trim() || `Practice complete for ${roleSummary}. Review the claims above and tighten any gaps before applying.`;
+    } catch (e) {
+      console.warn(`[parley] coach fell back: ${e instanceof Error ? e.message : e}`);
+      return `Practice complete for ${roleSummary}. Review which requirements your agent covered and which it didn’t, then strengthen your profile before applying.`;
     }
   }
 }

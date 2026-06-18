@@ -41,7 +41,7 @@ function signature(s: string): string {
   return [...words(s)].sort().join(' ');
 }
 
-export async function runParley(jobId: string, candidateAgentId: string, hooks?: ParleyHooks): Promise<Conversation> {
+export async function runParley(jobId: string, candidateAgentId: string, hooks?: ParleyHooks, opts?: { practice?: boolean }): Promise<Conversation> {
   const job = store.getJob(jobId);
   if (!job) throw new Error('job not found');
   const candidate = store.getAgent(candidateAgentId);
@@ -195,6 +195,14 @@ export async function runParley(jobId: string, candidateAgentId: string, hooks?:
   // filtered out before it can reach the human's decision.
   conv.reports.candidate = await buildReport(provider, conv, 'candidate', employer);
   conv.reports.employer = await buildReport(provider, conv, 'employer', candidate);
+
+  // Practice run: private to the candidate, with coaching instead of a real application.
+  if (opts?.practice) {
+    conv.practice = true;
+    const roleSummary = `${job.title} at ${job.company}${job.requirements.length ? ` — requires: ${job.requirements.join(', ')}` : ''}`;
+    const transcript = conv.turns.map((t) => `${byRole[t.role].displayName}: ${t.text}`).join('\n');
+    conv.coaching = await provider.coach(roleSummary, transcript);
+  }
 
   conv.updatedAt = now();
   store.putConversation(conv);

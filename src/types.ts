@@ -260,6 +260,29 @@ export interface Report {
   createdAt: string;
 }
 
+// ── Parley requests (mutual consent before the agents talk) ──────────────────
+
+export type RequestStatus = 'pending' | 'accepted' | 'declined';
+
+/**
+ * One side asks the other to parley; the agents only talk once it's accepted.
+ * A candidate requests against a posting; an employer requests a specific
+ * candidate for a posting. Either way the recipient accepts (which runs the
+ * parley) or declines.
+ */
+export interface ParleyRequest {
+  id: string;
+  jobId: string;
+  candidateAgentId: string;
+  employerAgentId: string;
+  fromRole: Role;                 // who initiated
+  status: RequestStatus;
+  message?: string;
+  conversationId?: string;        // set when accepted and the parley runs
+  createdAt: string;
+  updatedAt: string;
+}
+
 export type ConversationStatus =
   | 'pending'
   | 'running'
@@ -278,6 +301,8 @@ export interface Conversation {
   openAgenda: { candidate: string[]; employer: string[] };
   followups: Followup[];
   reports: { candidate?: Report; employer?: Report };
+  practice?: boolean;   // a candidate's private practice run — the employer never sees it
+  coaching?: string;    // post-practice feedback for the candidate
   endedReason?: string;
   createdAt: string;
   updatedAt: string;

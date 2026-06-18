@@ -11,9 +11,10 @@ import { id, now, store } from './store.ts';
 import { postJob, saveCandidateProfile, saveEmployerProfile } from './agents.ts';
 import { createSource, sourceView } from './sources.ts';
 import { getProvider } from './provider.ts';
+import { scoreJobForCandidate } from './match.ts';
 import { runParley } from './orchestrator.ts';
 import { tierOf, TIER_LABEL } from './claims.ts';
-import type { Conversation, Job, Role, User } from './types.ts';
+import type { Conversation, Job, ParleyRequest, Role, User } from './types.ts';
 
 const PROTOCOL = '2024-11-05';
 
@@ -37,6 +38,12 @@ function convSummary(c: Conversation) {
 function participantRole(c: Conversation, userId: string): Role | null {
   if (store.getAgent(c.candidateAgentId)?.userId === userId) return 'candidate';
   if (store.getAgent(c.employerAgentId)?.userId === userId) return 'employer';
+  return null;
+}
+
+function reqRole(r: ParleyRequest, userId: string): Role | null {
+  if (store.getAgent(r.candidateAgentId)?.userId === userId) return 'candidate';
+  if (store.getAgent(r.employerAgentId)?.userId === userId) return 'employer';
   return null;
 }
 
@@ -77,9 +84,14 @@ const NUM = (description: string) => ({ type: 'number', description });
 const TOOLS: Tool[] = [
   {
     name: 'whoami',
-    description: 'Who you are acting as on Parley, and whether a candidate profile / employer profile is set up.',
+    description: 'Who you are on Parley. Your account can BOTH seek jobs and hire — use any tool. Tells you what is set up.',
     inputSchema: { type: 'object', properties: {} },
-    run: (u) => ({ name: u.displayName, email: u.email, role: u.role, hasCandidateAgent: Boolean(u.agentId) }),
+    run: (u) => ({
+      name: u.displayName, email: u.email, defaultRole: u.role,
+      candidateProfile: u.agentId ? 'set up' : 'not set up (use update_candidate_profile / import_resume)',
+      postings: store.jobsByEmployerUser(u.id).length,
+      note: 'You can both apply to jobs and post jobs — every tool is available.',
+    }),
   },
   {
     name: 'list_open_jobs',
@@ -88,17 +100,101 @@ const TOOLS: Tool[] = [
     run: () => store.listJobs().map(jobSummary),
   },
   {
-    name: 'apply_to_job',
-    description: 'Apply to a job as the candidate. This kicks off a live "parley" where your agent and the employer\'s agent talk and exchange verifiable info. Returns a conversationId immediately; the parley runs in the background (~1–2 min) — call get_conversation with that id to read the transcript and report.',
+    name: 'find_matching_jobs',
+    description: 'List open jobs ranked by how well they fit your profile — a 0-100 match score plus which requirements you meet and miss. Use this to choose which roles are worth a parley request.',
     roles: ['candidate'],
-    inputSchema: { type: 'object', properties: { jobId: S('Job id from list_open_jobs.') }, required: ['jobId'] },
+    inputSchema: { type: 'object', properties: { minScore: NUM('Only return jobs at or above this match score (0-100).') } },
     run: (u, a) => {
       if (!u.agentId) throw new Error('Set up your candidate profile first with update_candidate_profile.');
-      if (!store.getJob(a.jobId)) throw new Error('No job with that id — call list_open_jobs for valid ids.');
+      const min = typeof a.minScore === 'number' ? a.minScore : 0;
+      return store.listJobs()
+        .map((j) => { const m = scoreJobForCandidate(j, u.agentId!); return { ...jobSummary(j), match: m.score, meets: m.met, missing: m.missing }; })
+        .filter((j) => j.match >= min)
+        .sort((x, y) => y.match - x.match);
+    },
+  },
+  {
+    name: 'find_candidates',
+    description: 'List candidates ranked by fit to one of your postings — a 0-100 match score plus requirements met/missing. Use with request_parley to invite the strongest matches.',
+    roles: ['employer'],
+    inputSchema: { type: 'object', properties: { jobId: S('Your posting to rank candidates against.') }, required: ['jobId'] },
+    run: (u, a) => {
+      const job = store.getJob(a.jobId);
+      if (!job || store.getAgent(job.employerAgentId)?.userId !== u.id) throw new Error('Not your posting.');
+      return store.listAgents('candidate').filter((c) => c.userId && c.userId !== u.id)
+        .map((c) => { const m = scoreJobForCandidate(job, c.id); return { candidateAgentId: c.id, name: c.principalName, match: m.score, meets: m.met, missing: m.missing }; })
+        .sort((x, y) => y.match - x.match);
+    },
+  },
+  {
+    name: 'request_parley',
+    description: 'Send a parley request — the consent step before the agents talk. As a candidate: request a job (the interviewer accepts). As an interviewer: invite a specific candidate to your posting (the candidate accepts). The recipient runs the parley by accepting. Returns the requestId.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        jobId: S('Job id (from find_matching_jobs, list_open_jobs, or your own posting).'),
+        candidateAgentId: S('Interviewer only: the candidate to invite, from find_candidates.'),
+        message: S('Optional note to send with the request.'),
+      },
+      required: ['jobId'],
+    },
+    run: (u, a) => {
+      const job = store.getJob(a.jobId);
+      if (!job) throw new Error('No job with that id.');
+      const mk = (candidateAgentId: string, fromRole: Role) => {
+        const existing = store.findRequest(job.id, candidateAgentId);
+        if (existing) return existing;
+        return store.putRequest({ id: id('req'), jobId: job.id, candidateAgentId, employerAgentId: job.employerAgentId, fromRole, status: 'pending', message: a.message, createdAt: now(), updatedAt: now() });
+      };
+      if (u.role === 'candidate') {
+        if (!u.agentId) throw new Error('Set up your profile first with update_candidate_profile.');
+        const r = mk(u.agentId, 'candidate');
+        return { ok: true, requestId: r.id, status: r.status, note: 'Request sent — the interviewer accepts it to start the parley.' };
+      }
+      if (store.getAgent(job.employerAgentId)?.userId !== u.id) throw new Error('Not your posting.');
+      const cand = a.candidateAgentId ? store.getAgent(a.candidateAgentId) : undefined;
+      if (!cand || cand.role !== 'candidate') throw new Error('candidateAgentId required — see find_candidates.');
+      const r = mk(cand.id, 'employer');
+      return { ok: true, requestId: r.id, status: r.status, note: 'Invite sent — the candidate accepts it to start the parley.' };
+    },
+  },
+  {
+    name: 'list_requests',
+    description: 'List your parley requests — ones you sent and ones sent to you, with their status. Accept the ones addressed to you with accept_request.',
+    inputSchema: { type: 'object', properties: {} },
+    run: (u) => store.listRequests().filter((r) => reqRole(r, u.id)).map((r) => {
+      const job = store.getJob(r.jobId);
+      const myRole = reqRole(r, u.id);
+      return { id: r.id, status: r.status, jobTitle: job?.title, company: job?.company, candidate: store.getAgent(r.candidateAgentId)?.principalName, fromRole: r.fromRole, sentByMe: myRole === r.fromRole, canAccept: myRole !== r.fromRole && r.status === 'pending', conversationId: r.conversationId };
+    }),
+  },
+  {
+    name: 'accept_request',
+    description: 'Accept a pending parley request addressed to you — this runs the parley between the two agents (in the background, ~1-2 min). Returns a conversationId; read it later with get_conversation.',
+    inputSchema: { type: 'object', properties: { requestId: S('Request id from list_requests.') }, required: ['requestId'] },
+    run: (u, a) => {
+      const r = store.getRequest(a.requestId);
+      if (!r) throw new Error('No such request.');
+      const role = reqRole(r, u.id);
+      if (!role || role === r.fromRole) throw new Error('Only the recipient can accept this request.');
+      if (r.status === 'declined') throw new Error('That request was declined.');
+      if (r.conversationId) return { ok: true, conversationId: r.conversationId, note: 'This parley already ran.' };
       let conversationId = '';
-      void runParley(a.jobId, u.agentId, { onStart: (cid) => { conversationId = cid; } })
-        .catch((e) => console.warn('[mcp] apply parley failed:', e instanceof Error ? e.message : e));
-      return { conversationId, status: 'running', note: 'Your agents are talking now. Call get_conversation with this id in ~1–2 minutes for the transcript and report.' };
+      void runParley(r.jobId, r.candidateAgentId, { onStart: (cid) => { conversationId = cid; } })
+        .then((conv) => { r.status = 'accepted'; r.conversationId = conv.id; r.updatedAt = now(); store.putRequest(r); })
+        .catch((e) => console.warn('[mcp] accept parley failed:', e instanceof Error ? e.message : e));
+      return { ok: true, conversationId, status: 'running', note: 'Accepted — the agents are talking now. Call get_conversation with this id in ~1-2 minutes.' };
+    },
+  },
+  {
+    name: 'decline_request',
+    description: 'Decline a pending parley request addressed to you.',
+    inputSchema: { type: 'object', properties: { requestId: S('Request id from list_requests.') }, required: ['requestId'] },
+    run: (u, a) => {
+      const r = store.getRequest(a.requestId);
+      if (!r || !reqRole(r, u.id)) throw new Error('No such request of yours.');
+      if (r.status === 'pending') { r.status = 'declined'; r.updatedAt = now(); store.putRequest(r); }
+      return { ok: true };
     },
   },
   {
@@ -355,8 +451,10 @@ const TOOLS: Tool[] = [
   },
 ];
 
-function toolsFor(user: User): Tool[] {
-  return TOOLS.filter((t) => !t.roles || t.roles.includes(user.role));
+// Every account can both seek and hire, so all tools are available. (The `roles`
+// hint is kept only to document a tool's typical side; it no longer gates.)
+function toolsFor(_user: User): Tool[] {
+  return TOOLS;
 }
 
 // ── JSON-RPC plumbing ─────────────────────────────────────────────────────────
@@ -371,11 +469,10 @@ async function dispatch(user: User, msg: any): Promise<unknown> {
       protocolVersion: params?.protocolVersion || PROTOCOL,
       capabilities: { tools: { listChanged: false } },
       serverInfo: { name: 'parley', version: '0.1.0' },
-      instructions: `You are connected to Parley as ${user.displayName} (${user.role}). ` +
-        (user.role === 'candidate'
-          ? 'You can browse and apply to jobs, manage the candidate profile and résumé, read parley logs, message interviewers, and schedule calls.'
-          : 'You can post jobs, review applicants, read parley logs, message candidates, and schedule calls.') +
-        ' Before calling a tool, ask the user for any required field you are missing.',
+      instructions: `You are connected to Parley as ${user.displayName}. This account can BOTH seek jobs and hire — every tool is available. ` +
+        'Seeking: find/apply to jobs, manage the candidate profile & résumé, practice, read logs. ' +
+        'Hiring: post jobs (create_job_posting), browse candidates (find_candidates), invite them (request_parley), review applicants. ' +
+        'Either side can message and schedule calls. Before calling a tool, ask the user for any required field you are missing.',
     });
   }
   if (method === 'tools/list') {

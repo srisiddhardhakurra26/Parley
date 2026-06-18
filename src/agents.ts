@@ -193,7 +193,7 @@ export function createEmployer(s: EmployerSetup, userId?: string): { agent: Agen
 /** Create or replace a candidate user's single standing agent + claim store. */
 export function saveCandidateProfile(userId: string, s: CandidateSetup): Agent {
   const user = store.getUser(userId);
-  if (!user || user.role !== 'candidate') throw new Error('not a candidate account');
+  if (!user) throw new Error('account not found'); // any account may set up a candidate agent
   // Rebuild in place: keep the same agent id (so past parleys stay linked to this
   // candidate) but drop and re-mint its claim store from the new inputs.
   const reuseId = user.agentId;
@@ -220,7 +220,7 @@ export function saveCandidateProfile(userId: string, s: CandidateSetup): Agent {
 /** Save an employer user's recruiting-agent defaults (applied to each posting). */
 export function saveEmployerProfile(userId: string, profile: UserProfile): User {
   const user = store.getUser(userId);
-  if (!user || user.role !== 'employer') throw new Error('not an employer account');
+  if (!user) throw new Error('account not found'); // any account may set up a recruiting agent
   user.profile = { ...user.profile, ...profile };
   return store.putUser(user);
 }
@@ -242,7 +242,7 @@ export interface JobSetup {
 /** Post a job: spins up a recruiting agent for it from the employer's defaults. */
 export function postJob(userId: string, j: JobSetup): { agent: Agent; job: Job } {
   const user = store.getUser(userId);
-  if (!user || user.role !== 'employer') throw new Error('not an employer account');
+  if (!user) throw new Error('account not found'); // any account may post a job
   const p: UserProfile = user.profile ?? {};
   const company = j.company || p.company || user.displayName;
 

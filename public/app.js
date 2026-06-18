@@ -89,16 +89,17 @@ function toggleNotifMenu() {
   menu.id = 'notifMenu';
   menu.className = 'notif-menu';
   menu.innerHTML = notif.items.length
-    ? notif.items.map((it) => `<button class="notif-item" data-conv="${it.conversationId}">
+    ? notif.items.map((it) => `<button class="notif-item" ${it.kind === 'request' ? `data-req="${it.requestId}"` : `data-conv="${it.conversationId}"`}>
         <div class="notif-row"><b>${esc(it.otherName)}</b><span class="notif-count">${it.unread}</span></div>
         ${it.jobTitle ? `<div class="notif-sub">${esc(it.jobTitle)}</div>` : ''}
         <div class="notif-last">${esc(String(it.lastText).slice(0, 72))}</div>
       </button>`).join('')
-    : `<div class="notif-empty muted">No unread messages</div>`;
+    : `<div class="notif-empty muted">Nothing new</div>`;
   document.body.appendChild(menu);
   const btn = document.getElementById('notifBtn');
   if (btn) { const r = btn.getBoundingClientRect(); menu.style.top = `${r.bottom + 8}px`; menu.style.right = `${window.innerWidth - r.right}px`; }
   menu.querySelectorAll('[data-conv]').forEach((b) => b.addEventListener('click', () => { const cid = b.getAttribute('data-conv'); menu.remove(); document.removeEventListener('click', closeNotifOutside); openConversationMessages(cid); }));
+  menu.querySelectorAll('[data-req]').forEach((b) => b.addEventListener('click', () => { menu.remove(); document.removeEventListener('click', closeNotifOutside); state.convId = null; state.tab = ws() === 'candidate' ? 'applications' : 'applicants'; route(); }));
   setTimeout(() => document.addEventListener('click', closeNotifOutside), 0);
 }
 function closeNotifOutside(e) {
@@ -107,12 +108,13 @@ function closeNotifOutside(e) {
 }
 function openConversationMessages(cid) {
   state.convId = cid;
-  state.tab = state.me.role === 'candidate' ? 'applications' : 'applicants';
+  state.tab = ws() === 'candidate' ? 'applications' : 'applicants';
   state.openMessages = true;
   route();
 }
 
-const state = { me: null, config: {}, tab: null, convId: null, openMessages: false };
+const state = { me: null, config: {}, tab: null, convId: null, openMessages: false, candJobId: null, workspace: null };
+const ws = () => state.workspace || state.me?.role || 'candidate';
 let autofillData = null; // résumé fields handed from the Sources tab to the agent form
 
 // ── speech (listenable logs) ─────────────────────────────────────────────────
@@ -184,12 +186,20 @@ function providerBadge() {
   return `<span class="badge mock" title="no API key set — deterministic mock provider">mock provider</span>`;
 }
 
+function workspaceSwitch() {
+  const w = ws();
+  return `<div class="ws-switch" role="tablist">
+    <button class="${w === 'candidate' ? 'sel' : ''}" data-ws="candidate">Job seeking</button>
+    <button class="${w === 'employer' ? 'sel' : ''}" data-ws="employer">Hiring</button>
+  </div>`;
+}
+
 function header() {
   const me = state.me;
   const tag = !me ? 'agents parley · humans decide'
-    : me.role === 'candidate' ? 'candidate workspace' : 'interviewer workspace';
+    : ws() === 'candidate' ? 'job-seeking workspace' : 'hiring workspace';
   const right = me
-    ? `${providerBadge()}<span class="badge role-${me.role}">${esc(me.displayName)} · ${me.role === 'candidate' ? 'Candidate' : 'Interviewer'}</span><button class="ghost" id="logoutBtn">Log out</button>`
+    ? `${workspaceSwitch()}${providerBadge()}<span class="badge">${esc(me.displayName)}</span><button class="ghost" id="logoutBtn">Log out</button>`
     : providerBadge();
   return `<header class="top"><div class="brand">${LOGO_MARK}<span class="wordmark">Parley</span> <small>${tag}</small></div><div class="spacer"></div>${me ? bellBtn() : ''}${themeBtn()}${right}</header>`;
 }
@@ -202,6 +212,10 @@ function frame(tabs, bodyHtml) {
   if (lo) lo.addEventListener('click', async () => { stopNotifPoll(); notif = { total: 0, items: [] }; await api('POST', '/api/auth/logout'); state.me = null; state.tab = null; state.convId = null; route(); });
   document.getElementById('themeBtn')?.addEventListener('click', toggleTheme);
   document.getElementById('notifBtn')?.addEventListener('click', (e) => { e.stopPropagation(); toggleNotifMenu(); });
+  app().querySelectorAll('.ws-switch [data-ws]').forEach((b) => b.addEventListener('click', () => {
+    if (state.workspace === b.dataset.ws) return;
+    state.workspace = b.dataset.ws; state.tab = null; state.convId = null; route();
+  }));
   app().querySelectorAll('nav.tabs button').forEach((b) => b.addEventListener('click', () => { state.tab = b.dataset.tab; state.convId = null; route(); }));
 }
 
@@ -342,6 +356,7 @@ const CAND_TABS = [
   { id: 'agent', label: 'My Agent' },
   { id: 'sources', label: 'Sources' },
   { id: 'jobs', label: 'Browse Jobs' },
+  { id: 'practice', label: 'Practice' },
   { id: 'applications', label: 'My Applications' },
   { id: 'connector', label: 'Connector' },
 ];
@@ -352,6 +367,7 @@ async function renderCandidate() {
   if (state.tab === 'agent') return candAgentView();
   if (state.tab === 'sources') return sourcesView();
   if (state.tab === 'jobs') return candJobsView();
+  if (state.tab === 'practice') return state.convId ? detailView('candidate') : candPracticeView();
   if (state.tab === 'applications') return state.convId ? detailView('candidate') : candApplicationsView();
   if (state.tab === 'connector') return connectorView();
 }
@@ -467,8 +483,24 @@ const ICON_PIN = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" st
 const ICON_CHECK = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>`;
 const ICON_X = `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>`;
 
-function jobCard(j, canApply) {
+function matchChip(score) {
+  if (score == null) return '';
+  const cls = score >= 70 ? 'high' : score >= 40 ? 'mid' : 'low';
+  return `<span class="match-chip ${cls}" title="how well this role fits your profile">${score}% match</span>`;
+}
+
+function jobCard(j, canApply, req) {
   const col = j.employer?.avatar?.color || '#27c498';
+  let cta;
+  if (req && req.conversationId) {
+    cta = `<button class="primary block" data-view-conv="${req.conversationId}">View the parley <span class="arr">→</span></button><div class="job-cta-note">Your agents have already talked.</div>`;
+  } else if (req && req.canAccept) {
+    cta = `<button class="primary block" data-accept-req="${req.id}">Accept invite — start parley <span class="arr">→</span></button><div class="job-cta-note">The interviewer asked to parley with you.</div>`;
+  } else if (req && req.status === 'pending') {
+    cta = `<button class="block" disabled>✓ Request sent</button><div class="job-cta-note">Waiting for the interviewer to accept and start the parley.</div>`;
+  } else {
+    cta = `<button class="primary block" data-apply="${j.id}" ${canApply ? '' : 'disabled'}>Request parley <span class="arr">→</span></button><div class="job-cta-note">Sends a request — the interviewer accepts to start the parley.</div>`;
+  }
   return `<div class="job-card">
     <div class="job-head">
       <div class="avatar" style="background:${esc(col)}22;border-color:${esc(col)}">${esc(j.employer?.avatar?.emoji || '🏢')}</div>
@@ -476,44 +508,51 @@ function jobCard(j, canApply) {
         <h3>${esc(j.title)}</h3>
         <div class="job-company">${esc(j.company)}</div>
       </div>
-      <span class="job-mode">${ICON_MODE} ${esc(j.remote)}</span>
+      ${matchChip(j.match)}
     </div>
-    <div class="job-salary"><span class="js-amt">${esc(j.currency)} ${j.salaryMin.toLocaleString()}–${j.salaryMax.toLocaleString()}</span><span class="js-per">/ year</span></div>
+    <div class="job-salary"><span class="js-amt">${esc(j.currency)} ${j.salaryMin.toLocaleString()}–${j.salaryMax.toLocaleString()}</span><span class="js-per">/ year</span><span class="job-mode" style="margin-left:auto">${ICON_MODE} ${esc(j.remote)}</span></div>
     <div class="job-facts">
       <span class="fact">${ICON_PIN} ${esc(j.location)}</span>
       <span class="fact ${j.visaSponsorship ? 'ok' : 'no'}">${j.visaSponsorship ? `${ICON_CHECK} Visa sponsored` : `${ICON_X} No sponsorship`}</span>
     </div>
     <div class="job-reqs">${j.requirements.map((r) => `<span class="req">${esc(r)}</span>`).join('')}</div>
-    <div class="job-cta">
-      <button class="primary block" data-apply="${j.id}" ${canApply ? '' : 'disabled'}>Apply <span class="arr">→</span></button>
-      <div class="job-cta-note">Lines up the parley — you start it when you’re ready.</div>
-    </div>
+    <div class="job-cta">${cta}</div>
   </div>`;
 }
 
 async function candJobsView() {
-  const jobs = await api('GET', '/api/jobs');
+  const [jobs, reqs] = await Promise.all([api('GET', '/api/jobs'), api('GET', '/api/me/requests').catch(() => [])]);
   if (!jobs.length) return (view().innerHTML = emptyState('No open roles yet.'));
   const canApply = state.me.hasAgent;
-  view().innerHTML = `${canApply ? '' : '<div class="callout">Set up your agent under <b>My Agent</b> before applying.</div>'}<div class="grid cols-2 jobs-grid">${jobs.map((j) => jobCard(j, canApply)).join('')}</div>`;
+  const reqByJob = {};
+  reqs.forEach((r) => { if (!reqByJob[r.jobId] || r.fromRole === 'candidate') reqByJob[r.jobId] = r; });
+  // best matches first
+  const sorted = jobs.slice().sort((a, b) => (b.match ?? -1) - (a.match ?? -1));
+  view().innerHTML = `${canApply ? '' : '<div class="callout">Set up your agent under <b>My Agent</b> before requesting a parley.</div>'}<div class="grid cols-2 jobs-grid">${sorted.map((j) => jobCard(j, canApply, reqByJob[j.id])).join('')}</div>`;
 
-  view().querySelectorAll('[data-apply]').forEach((b) => b.addEventListener('click', () => {
-    const job = jobs.find((j) => j.id === b.getAttribute('data-apply'));
-    if (job) startLiveParley(job);
+  view().querySelectorAll('[data-apply]').forEach((b) => b.addEventListener('click', async () => {
+    b.disabled = true; b.textContent = 'Sending…';
+    try { await api('POST', '/api/requests', { jobId: b.getAttribute('data-apply') }); toast('Request sent — the interviewer will accept to start the parley'); candJobsView(); }
+    catch (e) { toast(e.message); b.disabled = false; b.innerHTML = 'Request parley <span class="arr">→</span>'; }
   }));
+  view().querySelectorAll('[data-accept-req]').forEach((b) => b.addEventListener('click', () => {
+    const req = reqs.find((r) => r.id === b.getAttribute('data-accept-req'));
+    if (req) acceptRequest(req);
+  }));
+  view().querySelectorAll('[data-view-conv]').forEach((b) => b.addEventListener('click', () => { state.tab = 'applications'; state.convId = b.getAttribute('data-view-conv'); route(); }));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // LIVE PARLEY — stream the agent-to-agent conversation as it happens
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Consume the SSE stream from POST /api/apply. Each `data:` line is one event.
-async function streamApply(jobId, onEvent, signal) {
-  const res = await fetch('/api/apply', {
+// Consume the SSE parley stream from a POST endpoint. Each `data:` line is one event.
+async function streamRun(url, onEvent, signal, body = '{}') {
+  const res = await fetch(url, {
     method: 'POST',
     credentials: 'same-origin',
     headers: { 'content-type': 'application/json', accept: 'text/event-stream' },
-    body: JSON.stringify({ jobId }),
+    body,
     signal,
   });
   if (!res.ok || !res.body) {
@@ -563,22 +602,29 @@ function liveBubbleHtml(t) {
 }
 
 // Pre-flight first: line up both agents and wait. The model is NOT touched —
-// no tokens are spent — until the human explicitly presses "Start the parley".
-async function startLiveParley(job) {
-  stopSpeech();
+// Accept a parley request → open the live staging for it.
+function acceptRequest(req) {
+  startLiveParley({
+    runUrl: `/api/requests/${req.id}/run`,
+    candidate: { displayName: `${req.candidateName}'s agent`, avatar: req.candidateAvatar || { emoji: '🧑‍💻', color: '#6c8cff' }, principalName: req.candidateName },
+    employer: { displayName: `${req.company || 'Company'} recruiting agent`, avatar: { emoji: '🏢', color: '#27c498' }, principalName: req.company || 'the company' },
+    title: req.jobTitle || 'the role',
+    listTab: ws() === 'candidate' ? 'applications' : 'applicants',
+  });
+}
 
-  let cand = null;
-  try { const r = await api('GET', '/api/me/agent'); cand = r.agent; } catch {}
-  const candMeta = cand
-    ? { displayName: cand.displayName, avatar: cand.avatar, voice: cand.voice, principalName: state.me.displayName }
-    : { displayName: `${state.me.displayName}'s agent`, avatar: { emoji: '🧑‍💻', color: '#6c8cff' }, principalName: state.me.displayName };
-  const empMeta = job.employer || { displayName: `${job.company} recruiting agent`, avatar: { emoji: '🏢', color: '#27c498' }, principalName: job.company };
+// no tokens are spent — until the human explicitly presses "Start the parley".
+async function startLiveParley(opts) {
+  stopSpeech();
+  const candMeta = opts.candidate;
+  const empMeta = opts.employer;
+  const listTab = opts.listTab || 'applications';
   const model = String(state.config?.provider || '').split(':').pop();
   const costLabel = state.config?.hasKey ? `⚡ live AI · ${esc(model)}` : '⚙ deterministic mock';
 
   view().innerHTML = `
     <div class="row" style="margin-bottom:18px">
-      <button class="ghost" id="liveBack">← back to jobs</button>
+      <button class="ghost" id="liveBack">← back</button>
       <div class="spacer"></div>
       <span class="badge live"><i class="livedot"></i> live parley</span>
     </div>
@@ -593,8 +639,8 @@ async function startLiveParley(job) {
     <div class="preflight" id="preflight">
       <div class="preflight-head">
         <div>
-          <h3 style="margin:0">Ready to start the conversation</h3>
-          <div class="muted" style="margin-top:6px">Your agent will parley with <b>${esc(empMeta.displayName)}</b> about the <b>${esc(job.title)}</b> role.</div>
+          <h3 style="margin:0">Accept &amp; start the parley</h3>
+          <div class="muted" style="margin-top:6px">The two agents will parley about the <b>${esc(opts.title)}</b> role.</div>
         </div>
         <span class="cost-chip">${costLabel}</span>
       </div>
@@ -617,7 +663,7 @@ async function startLiveParley(job) {
   const $tx = $('#liveTranscript');
   const $count = $('#liveCount');
 
-  const goBack = () => { stopSpeech(); state.tab = 'jobs'; route(); };
+  const goBack = () => { stopSpeech(); state.tab = listTab; route(); };
   $('#liveBack').addEventListener('click', goBack);
   $('#cancelParley').addEventListener('click', goBack);
   $('#startParley').addEventListener('click', begin);
@@ -667,16 +713,17 @@ async function startLiveParley(job) {
       } else if (type === 'done') {
         finished = true;
         $status.innerHTML = `<span class="ok">✓ Parley complete</span> <span class="faint">· ${esc(data.endedReason || '')}</span>`;
-        $('#liveFoot').innerHTML = `<div class="done-bar"><div><b>The agents are done.</b> <span class="muted">Each side's report — claims, provenance, and your agent's read — is ready.</span></div><button class="primary" id="openReport">Open your report →</button></div>`;
-        $('#openReport').addEventListener('click', () => { stopSpeech(); state.tab = 'applications'; state.convId = data.id; route(); });
-        toast('Parley complete — your report is ready');
+        const coachHtml = data.coaching ? `<div class="coach-card">${coachingHtml(data.coaching)}</div>` : '';
+        $('#liveFoot').innerHTML = `${coachHtml}<div class="done-bar"><div><b>The agents are done.</b> <span class="muted">${data.coaching ? 'Your coaching is above.' : "Each side's report — claims, provenance, and your agent's read — is ready."}</span></div><button class="primary" id="openReport">Open the ${data.coaching ? 'practice report' : 'report'} →</button></div>`;
+        $('#openReport').addEventListener('click', () => { stopSpeech(); state.tab = listTab; state.convId = data.id; route(); });
+        toast(data.coaching ? 'Practice complete — coaching ready' : 'Parley complete — the report is ready');
       } else if (type === 'error') {
         finished = true;
         $status.innerHTML = `<span class="err">✕ ${esc(data.error || 'the parley failed')}</span>`;
       }
     };
 
-    streamApply(job.id, onEvent, ctrl.signal).catch((e) => {
+    streamRun(opts.runUrl, onEvent, ctrl.signal, opts.body || '{}').catch((e) => {
       if (ctrl.signal.aborted) return;
       finished = true;
       $status.innerHTML = `<span class="err">✕ ${esc(e.message || 'connection lost')}</span>`;
@@ -684,15 +731,94 @@ async function startLiveParley(job) {
   }
 }
 
+// One pending request (incoming = accept/decline; outgoing = waiting).
+function requestCard(r, viewerRole) {
+  const who = viewerRole === 'candidate' ? (r.company || 'A company') : (r.candidateName || 'A candidate');
+  if (r.canAccept) {
+    const verb = r.fromRole === 'candidate' ? 'wants to parley about' : 'invited you to parley for';
+    return `<div class="req-item incoming">
+      <div class="req-ico">🤝</div>
+      <div style="flex:1"><b>${esc(who)}</b> ${verb} <b>${esc(r.jobTitle || 'a role')}</b>${r.message ? `<div class="req-msg">“${esc(r.message)}”</div>` : ''}</div>
+      <button class="primary small" data-accept="${r.id}">Accept &amp; start →</button>
+      <button class="ghost small" data-decline="${r.id}">Decline</button>
+    </div>`;
+  }
+  return `<div class="req-item">
+    <div class="req-ico">⏳</div>
+    <div style="flex:1"><b>${esc(r.jobTitle || 'a role')}</b> <span class="muted">· ${esc(who)}</span><div class="req-msg muted">Request sent — waiting for ${viewerRole === 'candidate' ? 'the interviewer' : 'the candidate'} to accept.</div></div>
+    <span class="status running">pending</span>
+  </div>`;
+}
+
+function wireRequestActions(reqs, refresh) {
+  view().querySelectorAll('[data-accept]').forEach((b) => b.addEventListener('click', () => {
+    const r = reqs.find((x) => x.id === b.getAttribute('data-accept'));
+    if (r) acceptRequest(r);
+  }));
+  view().querySelectorAll('[data-decline]').forEach((b) => b.addEventListener('click', async () => {
+    try { await api('POST', `/api/requests/${b.getAttribute('data-decline')}/decline`); toast('Declined'); refresh(); }
+    catch (e) { toast(e.message); }
+  }));
+}
+
 async function candApplicationsView() {
-  const apps = await api('GET', '/api/me/applications');
-  if (!apps.length) return (view().innerHTML = emptyState('No applications yet. Browse <b>Jobs</b> and hit Apply.'));
-  view().innerHTML = `<h2 style="margin-bottom:14px">My applications</h2>` + apps.map((c) => `
-    <div class="conv-item" data-conv="${c.id}">
-      <span class="status ${c.status}">${esc(c.status)}</span>
-      <div style="flex:1">${esc(c.jobTitle || 'Role')} <span class="muted">@ ${esc(c.company || '')}</span></div>
-      <span class="muted">${c.turns} turns</span>
-    </div>`).join('');
+  const [reqs, convs] = await Promise.all([api('GET', '/api/me/requests'), api('GET', '/api/me/applications')]);
+  const incoming = reqs.filter((r) => r.canAccept);
+  const outgoing = reqs.filter((r) => r.mine && r.status === 'pending');
+  if (!incoming.length && !outgoing.length && !convs.length) {
+    return (view().innerHTML = emptyState('Nothing yet. Browse <b>Jobs</b> and request a parley — the interviewer accepts to start it.'));
+  }
+  const section = (title, html) => html ? `<h3 style="margin:22px 0 12px">${title}</h3>${html}` : '';
+  view().innerHTML = `<h2 style="margin-bottom:4px">My applications</h2>
+    ${section(`Invitations${incoming.length ? ` <span class="count-pill">${incoming.length}</span>` : ''}`, incoming.map((r) => requestCard(r, 'candidate')).join(''))}
+    ${section('Pending requests', outgoing.map((r) => requestCard(r, 'candidate')).join(''))}
+    ${section('Parleys', convs.map((c) => `
+      <div class="conv-item" data-conv="${c.id}">
+        <span class="status ${c.status}">${esc(c.status)}</span>
+        <div style="flex:1">${esc(c.jobTitle || 'Role')} <span class="muted">@ ${esc(c.company || '')}</span></div>
+        <span class="muted">${c.turns} turns</span>
+      </div>`).join(''))}`;
+  wireConvRows();
+  wireRequestActions(reqs, candApplicationsView);
+}
+
+// Format coaching text (How it went / What's missing / Do this next) into sections.
+function coachingHtml(text) {
+  return String(text).split(/\n(?=\s*(?:How it went|What.?s missing|Do this next))/i).map((p) => {
+    const m = p.trim().match(/^([^:]{3,44}):\s*([\s\S]*)$/);
+    return m ? `<div class="coach-sec"><div class="coach-h">${esc(m[1].trim())}</div><div>${esc(m[2].trim())}</div></div>` : `<div class="coach-sec">${esc(p.trim())}</div>`;
+  }).join('');
+}
+
+// Practice mode — a private dry-run against a posting's recruiting agent + coaching.
+async function candPracticeView() {
+  if (!state.me.hasAgent) return (view().innerHTML = '<div class="callout">Set up your agent under <b>My Agent</b> first — then practice it against any role.</div>');
+  const [jobs, runs] = await Promise.all([api('GET', '/api/jobs'), api('GET', '/api/me/practice')]);
+  view().innerHTML = `
+    <div class="card" style="max-width:720px">
+      <h3>🥊 Practice parley</h3>
+      <div class="muted" style="font-size:13.5px;line-height:1.6;margin-bottom:16px">A private dry-run against a real posting’s recruiting agent — <b>the employer never sees it</b>. You get the transcript, a report, and coaching on what’s missing to be a yes, before you apply for real.</div>
+      <label>Practice against</label>
+      <div class="row" style="gap:10px">
+        <select id="practiceJob" style="flex:1">${jobs.length ? jobs.map((j) => `<option value="${j.id}">${esc(j.title)} @ ${esc(j.company)}${j.match != null ? ` · ${j.match}% match` : ''}</option>`).join('') : '<option>No open roles to practice against</option>'}</select>
+        <button class="primary" id="runPractice" ${jobs.length ? '' : 'disabled'}>Run practice ▶</button>
+      </div>
+    </div>
+    ${runs.length ? `<h3 style="margin:24px 0 12px">Past practice runs</h3>${runs.map((c) => `
+      <div class="conv-item" data-conv="${c.id}"><span class="status ${c.status}">${esc(c.status)}</span><div style="flex:1">${esc(c.jobTitle || 'Role')} <span class="muted">@ ${esc(c.company || '')}</span></div><span class="muted">${c.turns} turns</span></div>`).join('')}` : ''}`;
+
+  $('#runPractice')?.addEventListener('click', () => {
+    const job = jobs.find((j) => j.id === $('#practiceJob').value);
+    if (!job) return;
+    startLiveParley({
+      runUrl: '/api/practice',
+      body: JSON.stringify({ jobId: job.id }),
+      candidate: { displayName: `${state.me.displayName}'s agent`, avatar: { emoji: '🧑‍💻', color: '#6c8cff' }, principalName: state.me.displayName },
+      employer: job.employer || { displayName: `${job.company} recruiting agent`, avatar: { emoji: '🏢', color: '#27c498' }, principalName: job.company },
+      title: job.title,
+      listTab: 'practice',
+    });
+  });
   wireConvRows();
 }
 
@@ -703,6 +829,7 @@ const EMP_TABS = [
   { id: 'profile', label: 'My Recruiting Agent' },
   { id: 'sources', label: 'Sources' },
   { id: 'postings', label: 'Postings' },
+  { id: 'candidates', label: 'Candidates' },
   { id: 'applicants', label: 'Applicants' },
   { id: 'connector', label: 'Connector' },
 ];
@@ -713,6 +840,7 @@ async function renderEmployer() {
   if (state.tab === 'profile') return empProfileView();
   if (state.tab === 'sources') return sourcesView();
   if (state.tab === 'postings') return empPostingsView();
+  if (state.tab === 'candidates') return empCandidatesView();
   if (state.tab === 'applicants') return state.convId ? detailView('employer') : empApplicantsView();
   if (state.tab === 'connector') return connectorView();
 }
@@ -792,15 +920,68 @@ The team is 8 engineers; this opens a new reliability pod</textarea>
 }
 
 async function empApplicantsView() {
-  const apps = await api('GET', '/api/me/applicants');
-  if (!apps.length) return (view().innerHTML = emptyState('No applicants yet. When a candidate applies, their parley shows up here.'));
-  view().innerHTML = `<h2 style="margin-bottom:14px">Applicants</h2>` + apps.map((c) => `
-    <div class="conv-item" data-conv="${c.id}">
-      <span class="status ${c.status}">${esc(c.status)}</span>
-      <div style="flex:1"><b>${esc(c.candidateName || 'Candidate')}</b> <span class="muted">→ ${esc(c.jobTitle || '')}</span></div>
-      <span class="muted">${c.turns} turns</span>
-    </div>`).join('');
+  const [reqs, apps] = await Promise.all([api('GET', '/api/me/requests'), api('GET', '/api/me/applicants')]);
+  const incoming = reqs.filter((r) => r.canAccept);
+  const outgoing = reqs.filter((r) => r.mine && r.status === 'pending');
+  if (!incoming.length && !outgoing.length && !apps.length) {
+    return (view().innerHTML = emptyState('No requests yet. Browse <b>Candidates</b> to invite someone, or wait for candidates to request a parley.'));
+  }
+  const section = (title, html) => html ? `<h3 style="margin:22px 0 12px">${title}</h3>${html}` : '';
+  view().innerHTML = `<h2 style="margin-bottom:4px">Applicants</h2>
+    ${section(`Requests${incoming.length ? ` <span class="count-pill">${incoming.length}</span>` : ''}`, incoming.map((r) => requestCard(r, 'employer')).join(''))}
+    ${section('Invites sent', outgoing.map((r) => requestCard(r, 'employer')).join(''))}
+    ${section('Parleys', apps.map((c) => `
+      <div class="conv-item" data-conv="${c.id}">
+        <span class="status ${c.status}">${esc(c.status)}</span>
+        <div style="flex:1"><b>${esc(c.candidateName || 'Candidate')}</b> <span class="muted">→ ${esc(c.jobTitle || '')}</span></div>
+        <span class="muted">${c.turns} turns</span>
+      </div>`).join(''))}`;
   wireConvRows();
+  wireRequestActions(reqs, empApplicantsView);
+}
+
+// Candidate directory — pick a posting, see candidates ranked by fit, invite the best.
+async function empCandidatesView() {
+  const jobs = await api('GET', '/api/me/jobs');
+  if (!jobs.length) return (view().innerHTML = emptyState('Post a job first under <b>Postings</b>, then browse matching candidates here.'));
+  if (!state.candJobId || !jobs.some((j) => j.id === state.candJobId)) state.candJobId = jobs[0].id;
+  const cands = await api('GET', '/api/candidates?jobId=' + encodeURIComponent(state.candJobId));
+  const job = jobs.find((j) => j.id === state.candJobId);
+  view().innerHTML = `
+    <div class="row" style="margin-bottom:16px;gap:12px;flex-wrap:wrap">
+      <h2 style="margin:0">Candidates</h2>
+      <div class="spacer"></div>
+      <label style="margin:0;display:flex;align-items:center;gap:8px;font-size:13px">Ranked for
+        <select id="candJob" style="width:auto">${jobs.map((j) => `<option value="${j.id}" ${j.id === state.candJobId ? 'selected' : ''}>${esc(j.title)}</option>`).join('')}</select>
+      </label>
+    </div>
+    ${cands.length ? cands.map((c) => candidateCard(c, job)).join('') : '<div class="card muted">No candidates have set up an agent yet.</div>'}`;
+
+  $('#candJob').addEventListener('change', (e) => { state.candJobId = e.target.value; empCandidatesView(); });
+  view().querySelectorAll('[data-invite]').forEach((b) => b.addEventListener('click', async () => {
+    b.disabled = true; b.textContent = 'Sending…';
+    try { await api('POST', '/api/requests', { jobId: state.candJobId, candidateAgentId: b.getAttribute('data-invite') }); toast('Invite sent — the candidate accepts to start the parley'); empCandidatesView(); }
+    catch (e) { toast(e.message); empCandidatesView(); }
+  }));
+  view().querySelectorAll('[data-view-conv]').forEach((b) => b.addEventListener('click', () => { state.tab = 'applicants'; state.convId = b.getAttribute('data-view-conv'); route(); }));
+}
+
+function candidateCard(c, job) {
+  const col = c.avatar?.color || '#6c8cff';
+  const met = (c.met || []).slice(0, 4).map((r) => `<span class="req ok">${esc(r)}</span>`).join('');
+  const miss = (c.missing || []).slice(0, 3).map((r) => `<span class="req miss">${esc(r)}</span>`).join('');
+  let cta;
+  if (c.requestStatus === 'accepted' || c.requestId && c.requestStatus !== 'pending' && c.requestStatus !== 'declined') cta = `<button class="ghost small" disabled>parleyed</button>`;
+  else if (c.requestStatus === 'pending') cta = `<button class="ghost small" disabled>invited ✓</button>`;
+  else cta = `<button class="primary small" data-invite="${c.agentId}">Invite to parley →</button>`;
+  return `<div class="cand-card">
+    <div class="avatar" style="background:${esc(col)}22;border-color:${esc(col)}">${esc(c.avatar?.emoji || '🧑‍💻')}</div>
+    <div style="flex:1;min-width:0">
+      <div class="row" style="gap:10px"><b style="font-size:15px">${esc(c.name || 'Candidate')}</b>${matchChip(c.match)}<span class="faint" style="font-size:12px">${c.claims} claims</span></div>
+      <div class="wrap" style="margin-top:8px">${met}${miss}</div>
+    </div>
+    ${cta}
+  </div>`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -830,7 +1011,7 @@ function srcCard(s) {
       <div class="src-title">${esc(s.title)}</div>
       <div class="faint" style="font-size:12px">${esc(s.kind)} · ${meta}</div>
     </div>
-    ${state.me.role === 'candidate' && s.kind === 'resume' ? `<button class="ghost small" data-fill-src="${s.id}">✨ Fill profile</button>` : ''}
+    ${ws() === 'candidate' && s.kind === 'resume' ? `<button class="ghost small" data-fill-src="${s.id}">✨ Fill profile</button>` : ''}
     <a class="ghost small" href="/api/sources/${s.id}/raw" target="_blank" rel="noopener">Open</a>
     <button class="ghost small" data-del-src="${s.id}">Delete</button>
   </div>`;
@@ -838,7 +1019,7 @@ function srcCard(s) {
 
 async function sourcesView() {
   const sources = await api('GET', '/api/me/sources');
-  const isCand = state.me.role === 'candidate';
+  const isCand = ws() === 'candidate';
   view().innerHTML = `
     <div class="grid cols-2">
       <div class="card">
@@ -914,7 +1095,7 @@ async function sourcesView() {
 // ─────────────────────────────────────────────────────────────────────────────
 async function connectorView() {
   const c = await api('GET', '/api/me/connector');
-  const isCand = state.me.role === 'candidate';
+  const isCand = ws() === 'candidate';
   const cmd = `claude mcp add --transport http parley "${c.url}"`;
   const cursorLink = `cursor://anysphere.cursor-deeplink/mcp/install?name=Parley&config=${encodeURIComponent(btoa(JSON.stringify({ url: c.url })))}`;
   const examples = isCand
@@ -1030,6 +1211,32 @@ async function loadDMs(convId) {
   if (atBottom) thread.scrollTop = thread.scrollHeight;
 }
 
+// Copilot chat — grounded Q&A about the other side, within one parley.
+function wireCopilot(convId, subjectName) {
+  const form = $('#cpForm');
+  if (!form) return;
+  const history = [];
+  const thread = $('#cpThread');
+  const ask = async (q) => {
+    if (!q.trim()) return;
+    $('#cpInput').value = '';
+    thread.querySelector('.cp-hint')?.remove();
+    thread.insertAdjacentHTML('beforeend', `<div class="dm-msg mine"><div class="dm-text">${esc(q)}</div></div>`);
+    const tid = 'cp_' + Date.now();
+    thread.insertAdjacentHTML('beforeend', `<div class="dm-msg" id="${tid}"><div class="dm-text cp-think"><span class="dots"><i></i><i></i><i></i></span></div></div>`);
+    thread.scrollTop = thread.scrollHeight;
+    try {
+      const { answer } = await api('POST', `/api/conversations/${convId}/ask`, { question: q, history: history.slice() });
+      document.getElementById(tid)?.remove();
+      thread.insertAdjacentHTML('beforeend', `<div class="dm-msg"><div class="dm-text cp-ans">🤖 ${esc(answer)}</div></div>`);
+      history.push({ role: 'user', content: q }, { role: 'assistant', content: answer });
+      thread.scrollTop = thread.scrollHeight;
+    } catch (err) { document.getElementById(tid)?.remove(); toast(err.message); }
+  };
+  form.addEventListener('submit', (e) => { e.preventDefault(); ask($('#cpInput').value); });
+  thread.querySelectorAll('.cp-chip').forEach((b) => b.addEventListener('click', () => ask(b.textContent)));
+}
+
 function openMessages(convId, otherName) {
   api('POST', `/api/conversations/${convId}/read`).then(pollNotifications).catch(() => {});
   loadDMs(convId);
@@ -1064,7 +1271,7 @@ function openMessages(convId, otherName) {
 async function detailView(viewerRole) {
   const c = await api('GET', '/api/conversations/' + state.convId);
   const turnsById = Object.fromEntries(c.turns.map((t) => [t.id, t]));
-  const backLabel = viewerRole === 'candidate' ? '← my applications' : '← applicants';
+  const backLabel = c.practice ? '← practice' : (viewerRole === 'candidate' ? '← my applications' : '← applicants');
 
   const transcript = c.turns.map((t) => `
     <div class="bubble ${t.role}" id="${esc(t.id)}">
@@ -1082,7 +1289,8 @@ async function detailView(viewerRole) {
   const otherClaims = c.claims.filter((cl) => cl.subjectRole === counterRole);
   const convUnread = (notif.items.find((i) => i.conversationId === state.convId)?.unread) || 0;
   const report = c.reports[viewerRole];
-  const connectCta = `
+  // No "message / schedule call" CTA on a practice run — there's no real counterpart.
+  const connectCta = c.practice ? '' : `
     <div class="connect-cta">
       <span class="muted">Like what your agent found? Take it from here:</span>
       <div class="row" style="gap:8px;margin-top:10px;flex-wrap:wrap">
@@ -1090,14 +1298,16 @@ async function detailView(viewerRole) {
         <button class="primary small" id="reportCall">📹 Schedule a video call</button>
       </div>
     </div>`;
+  const coachCard = c.coaching ? `<div class="coach-card"><div class="coach-title">🥊 Your coaching</div>${coachingHtml(c.coaching)}</div>` : '';
   const reportHtml = report ? `
+    ${coachCard}
     <div class="report">
-      <h3>${viewerRole === 'candidate' ? '🧑‍💻 Your agent’s report on the company' : '🏢 Your agent’s report on the candidate'}</h3>
+      <h3>${c.practice ? '🥊 Practice report' : (viewerRole === 'candidate' ? '🧑‍💻 Your agent’s report on the company' : '🏢 Your agent’s report on the candidate')}</h3>
       <div class="muted" style="font-size:12.5px;margin-bottom:8px">Claims with provenance, then your agent’s read. You decide — the agent never scores.</div>
       ${report.learned.length ? report.learned.slice().sort((a, b) => b.rank - a.rank).map(claimCard).join('') : '<div class="muted">Nothing concrete learned.</div>'}
       <div class="read"><div class="lbl">⚑ Agent’s read · inference, not a verdict</div>${esc(report.read)}</div>
       ${connectCta}
-    </div>` : `<div class="muted">No report.</div>${connectCta}`;
+    </div>` : `${coachCard}<div class="muted">No report.</div>${connectCta}`;
 
   const claimsHtml = otherClaims.length ? otherClaims.slice().sort((a, b) => b.rank - a.rank).map(claimCard).join('') : '<div class="muted">No claims surfaced about the other side.</div>';
   const agendaList = (items, kind) => items.length ? items.map((a) => `<div class="agenda-item">${esc(a)}</div>`).join('') : `<div class="agenda-item done">✓ all ${kind} questions answered</div>`;
@@ -1115,7 +1325,7 @@ async function detailView(viewerRole) {
         <div class="transcript">${transcript}</div>
       </div>
       <div>
-        <div class="side-tabs"><button class="active" data-side="report">Report</button><button data-side="claims">Claims (${otherClaims.length})</button><button data-side="agendas">Agendas</button><button data-side="messages">Messages${convUnread ? ` <span class="tab-badge">${convUnread}</span>` : ''}</button></div>
+        <div class="side-tabs"><button class="active" data-side="report">Report</button><button data-side="claims">Claims (${otherClaims.length})</button><button data-side="copilot">Copilot</button><button data-side="agendas">Agendas</button><button data-side="messages">Messages${convUnread ? ` <span class="tab-badge">${convUnread}</span>` : ''}</button></div>
         <div id="sideReport" class="side-pane">${reportHtml}</div>
         <div id="sideClaims" class="side-pane" style="display:none"><div class="muted" style="font-size:12.5px;margin-bottom:8px">What your agent learned about <b>${esc(otherName)}</b>, with provenance. Click a <span class="src-link">↳ source</span> to jump to the moment it was said, or a <span class="src-link">📄 document</span> to open the file.</div>${claimsHtml}</div>
         <div id="sideAgendas" class="side-pane" style="display:none"><div class="card">
@@ -1123,6 +1333,13 @@ async function detailView(viewerRole) {
           <div class="agenda-col" style="margin-top:14px"><h4>Interviewer still wanted to know</h4>${agendaList(c.openAgenda.employer, 'employer')}</div>
           <div class="agenda-col" style="margin-top:14px"><h4>Followups</h4>${followups}</div>
         </div></div>
+        <div id="sideCopilot" class="side-pane" style="display:none">
+          <div class="dm-panel">
+            <div class="dm-head"><div>🤖 Copilot <span class="muted">· ask about ${esc(otherName)}</span></div></div>
+            <div class="dm-thread" id="cpThread"><div class="cp-hint muted">Ask anything — I only answer from this parley (claims, transcript, the read), and I’ll say when something wasn’t covered.<div class="cp-suggest">${['Does ' + esc(otherName) + ' meet the requirements?', 'What’s verified vs self-stated?', 'Biggest gap or red flag?'].map((s) => `<button class="cp-chip" type="button">${s}</button>`).join('')}</div></div></div>
+            <form class="dm-compose" id="cpForm"><input id="cpInput" placeholder="Ask about ${esc(otherName)}…" autocomplete="off" /><button class="primary" type="submit">Ask</button></form>
+          </div>
+        </div>
         <div id="sideMessages" class="side-pane" style="display:none">
           <div class="dm-panel">
             <div class="dm-head"><div>Direct messages with <b>${esc(otherName)}</b></div><button class="ghost small" id="scheduleCall">📹 Schedule call</button></div>
@@ -1138,12 +1355,14 @@ async function detailView(viewerRole) {
     $('#sideReport').style.display = w === 'report' ? '' : 'none';
     $('#sideClaims').style.display = w === 'claims' ? '' : 'none';
     $('#sideAgendas').style.display = w === 'agendas' ? '' : 'none';
+    $('#sideCopilot').style.display = w === 'copilot' ? '' : 'none';
     $('#sideMessages').style.display = w === 'messages' ? '' : 'none';
     if (w === 'messages') { view().querySelector('[data-side="messages"] .tab-badge')?.remove(); openMessages(state.convId, otherName); } else stopDMPoll();
   };
 
   $('#backBtn').addEventListener('click', () => { stopSpeech(); stopDMPoll(); state.convId = null; route(); });
   view().querySelectorAll('[data-side]').forEach((b) => b.addEventListener('click', () => showSide(b.getAttribute('data-side'))));
+  wireCopilot(state.convId, otherName);
   $('#goMessages')?.addEventListener('click', () => showSide('messages'));
   $('#reportCall')?.addEventListener('click', async () => {
     try { await api('POST', `/api/conversations/${state.convId}/call`, {}); toast('Call link sent'); showSide('messages'); }
@@ -1183,7 +1402,8 @@ function route() {
   stopSpeech();
   stopDMPoll();
   if (!state.me) return renderAuth();
-  if (state.me.role === 'candidate') return renderCandidate();
+  if (!state.workspace) state.workspace = state.me.role;
+  if (state.workspace === 'candidate') return renderCandidate();
   return renderEmployer();
 }
 
